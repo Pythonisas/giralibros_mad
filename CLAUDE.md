@@ -4,26 +4,37 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Giralibros is a Django-based book exchange platform where users can offer books for exchange and request books from other users. The system includes location-based filtering (focused on Buenos Aires areas) and manages exchange requests between users.
+Giralibros is a Flask-based book exchange platform where users can offer books for exchange and request books from other users. The system includes location-based filtering (focused on Buenos Aires areas) and manages exchange requests between users.
 
 ## Development Commands
 
-**Note**: This project uses `uv` for dependency management. All Python commands should be run with `uv run` prefix (e.g., `uv run python manage.py`).
+**Note**: This project uses `uv` for dependency management. All Python commands should be run with `uv run` prefix.
 
-The most important commands are specified in a Makefile. Use the makefile as documentation but don't NEVER run make commands.
+The most important commands are specified in a Makefile. Use the makefile as documentation but NEVER run make commands directly.
 
 ## Architecture
 
-See Models (books/models.py)
+The app uses the Flask application factory pattern:
 
-## Django Configuration
+- **`app.py`**: `create_app()` factory — wires extensions, registers the blueprint, registers Jinja2 filters
+- **`extensions.py`**: singleton extension instances (`db`, `login_manager`, `mail`, `migrate`)
+- **`config.py`**: `DevelopmentConfig`, `TestingConfig`, `ProductionConfig` — selected via `FLASK_ENV`
+- **`books/views.py`**: single Blueprint (`views`) containing all routes
+- **`books/models.py`**: SQLAlchemy models and query helper functions
+- **`books/forms.py`**: Flask-WTF forms
+- **`books/filters.py`**: custom Jinja2 filters registered in `create_app()`
+- **`books/admin_views.py`**: Flask-Admin configuration
+- **`books/templates/`**: all Jinja2 templates
 
-- **Database**: SQLite (db.sqlite3)
-- **Python Version**: >= 3.14
-- **Django Version**: >= 4.2.26
-- **Settings Module**: giralibros.settings
-- **Installed Apps**: Standard Django apps + 'books'
-- **Admin Interface**: Enabled at /admin/
+## Flask Configuration
+
+- **Database**: SQLite (`db.sqlite3`) via Flask-SQLAlchemy
+- **Python Version**: >= 3.12
+- **Flask Version**: >= 3.1
+- **Key extensions**: Flask-SQLAlchemy, Flask-Login, Flask-WTF, Flask-Mail, Flask-Migrate, Flask-Admin
+- **Config selection**: `FLASK_ENV` environment variable (`development` / `testing` / `production`; defaults to `development`)
+- **Admin interface**: Flask-Admin at `/admin/`
+- **Migrations**: Flask-Migrate (`uv run flask db migrate` / `uv run flask db upgrade`)
 
 ## Testing Philosophy
 
@@ -33,9 +44,9 @@ The goal of testing is to **catch bugs and prevent regressions**. Tests should f
 
 ### Preferred Testing Approach
 
-1. **Favor integration tests over unit tests**: Test Django views with real HTTP requests and database interactions using Django's `TestCase` (which provides transaction isolation)
+1. **Favor integration tests over unit tests**: Test Flask views with real HTTP requests and database interactions using pytest + pytest-flask (`conftest.py` provides `app`, `client`, `db_cleanup`, and `outbox` fixtures)
 2. **Test business logic through behavior**: Focus on meaningful user actions (creating exchange requests, filtering by location, reserving books) rather than testing individual model methods in isolation
-3. **Use the real database**: Never mock Django's ORM or database; use Django's test database
+3. **Use the real database**: Never mock SQLAlchemy or the database; use the in-memory SQLite test database configured in `TestingConfig`
 4. **Minimize mocking**: Only mock external services (email, third-party APIs). Don't mock internal collaborators or model relationships
 5. **Keep tests simple**: Use helper functions to reduce duplication, but avoid complex test abstractions or frameworks
 
@@ -47,7 +58,7 @@ The goal of testing is to **catch bugs and prevent regressions**. Tests should f
 
 ### What NOT to Test
 
-- Django framework behavior (URL routing, ORM functionality)
+- Flask framework behavior (URL routing, SQLAlchemy ORM functionality)
 - Simple CRUD operations without business logic
 - Implementation details (internal method calls, private functions)
 - Every single code path (coverage is informative, not a target)
@@ -61,7 +72,7 @@ When working with tests:
 - **Discuss before adjusting code for tests**: If a test requires changing production code, discuss the approach first rather than immediately modifying the code to make tests pass
 - **Use docstrings**: Every test method should have a one-sentence docstring explaining the use case or business rule being tested (e.g., "Test that a user is redirected to profile setup on first login")
 - **Propose tests for new business logic**: When adding new features with business rules, propose test cases (with FIXME placeholders for specs) for the human to review and fill in, but don't implement them without permission
-- **No direct database access in client tests**: Tests using Django's test client should only check observable application behavior (status codes, redirects, response content, outbound emails). Don't directly access the database to verify state (e.g., `User.objects.get()`, checking model attributes). The only exception is helper methods with explicit FIXME notes for temporary workarounds.
+- **No direct database access in client tests**: Tests using the Flask test client should only check observable application behavior (status codes, redirects, response content, outbound emails). Don't directly access the database to verify state (e.g., `User.query.filter_by(...)`, checking model attributes). The only exception is helper methods with explicit FIXME notes for temporary workarounds.
 
 ## Code Style
 
