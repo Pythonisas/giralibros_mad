@@ -1,14 +1,21 @@
-.PHONY: test run deploy collectstatic sql shell
-django=uv run manage.py
+.PHONY: test run shell migrate upgrade deploy sql prod-db-pull prod-img-pull
+
+flask=uv run flask
 
 test:
-	$(django) test --settings=giralibros.settings.test
+	uv run pytest
 
 run:
-	$(django) runserver
+	FLASK_ENV=development $(flask) run
 
 shell:
-	$(django) shell
+	$(flask) shell
+
+migrate:
+	$(flask) db migrate
+
+upgrade:
+	$(flask) db upgrade
 
 BRANCH ?= main
 deploy:
@@ -16,16 +23,11 @@ deploy:
 		git fetch &&\
 		git checkout $(BRANCH) &&\
 		git pull origin $(BRANCH) --ff-only &&\
-		sudo su libros -l -c \"cd ~/giralibros && uv sync && make collectstatic && uv run manage.py migrate\" &&\
+		sudo su libros -l -c \"cd ~/giralibros && uv sync && uv run flask db upgrade\" &&\
 		sudo systemctl restart gunicorn"
-
-collectstatic:
-	set -a && . /etc/giralibros/env && uv run python manage.py collectstatic --settings=giralibros.settings.production --noinput
-
 
 sql:
 	sqlite3 -cmd ".open db.sqlite3"
-
 
 prod-db-pull:
 	scp $(SSH):/home/libros/giralibros/db.sqlite3 db.sqlite3
