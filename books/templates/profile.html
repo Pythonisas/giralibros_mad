@@ -138,7 +138,7 @@
                     <span>Editar</span>
                   </a>
                 {% else %}
-                  {% include '_exchange_button.html' with button_classes='is-small' icon_classes='is-small' %}
+                  {% with button_classes='is-small', icon_classes='is-small' %}{% include '_exchange_button.html' %}{% endwith %}
                 {% endif %}
               </div>
             </div>

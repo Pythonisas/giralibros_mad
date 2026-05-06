@@ -1193,7 +1193,7 @@ class TestBookCover(BookTestMixin):
         image_io = io.BytesIO()
         image.save(image_io, format="JPEG")
         image_io.seek(0)
-        return (filename, image_io, "image/jpeg")
+        return (image_io, filename, "image/jpeg")
 
     def _file_exists(self, app, image_url):
         """
@@ -1414,8 +1414,8 @@ class TestBookCover(BookTestMixin):
         book_id = self._get_book_id(app, "testuser", "Test Book")
 
         text_file = (
-            "test.txt",
             io.BytesIO(b"This is not an image"),
+            "test.txt",
             "text/plain",
         )
 

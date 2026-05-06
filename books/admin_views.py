@@ -16,11 +16,11 @@ class SecureModelView(ModelView):
 
 
 def init_admin(app):
-    admin = Admin(app, name="GiraLibros Admin", template_mode="bootstrap4")
-    admin.add_view(SecureModelView(User, db.session))
-    admin.add_view(SecureModelView(UserProfile, db.session))
-    admin.add_view(SecureModelView(UserLocation, db.session))
-    admin.add_view(SecureModelView(OfferedBook, db.session))
-    admin.add_view(SecureModelView(WantedBook, db.session))
-    admin.add_view(SecureModelView(Like, db.session))
-    admin.add_view(SecureModelView(ExchangeRequest, db.session))
+    admin = Admin(app, name="GiraLibros Admin")
+    admin.add_view(SecureModelView(User, db))
+    admin.add_view(SecureModelView(UserProfile, db))
+    admin.add_view(SecureModelView(UserLocation, db))
+    admin.add_view(SecureModelView(OfferedBook, db))
+    admin.add_view(SecureModelView(WantedBook, db))
+    admin.add_view(SecureModelView(Like, db))
+    admin.add_view(SecureModelView(ExchangeRequest, db))
