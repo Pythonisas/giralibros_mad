@@ -1,33 +1,29 @@
-import logging
-from io import BytesIO
+import os
+from datetime import datetime, timedelta, timezone
 
-from django.conf import settings
-from django.contrib.auth import login as auth_login
-from django.contrib.auth import logout as auth_logout
-from django.contrib.auth.decorators import login_required
-from django.contrib.auth.models import User
-from django.contrib.auth.tokens import default_token_generator
-from django.contrib.auth.views import PasswordResetConfirmView, PasswordResetView
-from django.core.files.uploadedfile import InMemoryUploadedFile
-from django.core.mail import EmailMultiAlternatives
-from django.core.paginator import Paginator
-from django.db import transaction
-from django.http import HttpResponse, HttpResponseBadRequest, JsonResponse
-from django.shortcuts import get_object_or_404, redirect, render
-from django.template.loader import render_to_string
-from django.urls import reverse, reverse_lazy
-from django.utils import timezone
-from django.utils.encoding import force_bytes, force_str
-from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
-from honeypot.decorators import check_honeypot
-from PIL import Image, ImageOps
+from flask import (
+    Blueprint,
+    abort,
+    current_app,
+    flash,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_from_directory,
+    url_for,
+)
+from flask_login import current_user, login_required, login_user, logout_user
+from flask_mail import Message
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
+from extensions import db, mail
 from books.forms import (
-    CustomSetPasswordForm,
-    EmailOrUsernameAuthenticationForm,
+    LoginForm,
     OfferedBookForm,
+    PasswordResetForm,
     PasswordResetRequestForm,
-    ProfileForm,
+    ProfileEditForm,
     RegistrationForm,
     WantedBookForm,
 )
@@ -35,815 +31,814 @@ from books.models import (
     BookStatus,
     ExchangeRequest,
     OfferedBook,
+    User,
     UserLocation,
     UserProfile,
     WantedBook,
+    get_books_for_profile,
+    get_books_for_user,
+    get_recent_received_requests,
+    get_recent_sent_requests,
+    get_traded_by,
 )
 
-logger = logging.getLogger(__name__)
+views = Blueprint("views", __name__)
 
 
-def honeypot_responder(request, context):
-    """
-    Custom responder for honeypot violations.
-    Logs the attempt and returns 403 Forbidden for easier monitoring.
-    """
-    ip = request.META.get("HTTP_X_FORWARDED_FOR", "").split(",")[
-        0
-    ].strip() or request.META.get("REMOTE_ADDR")
-    logger.warning(
-        f"Honeypot violation detected: IP={ip}, "
-        f"Path={request.path}, User-Agent={request.META.get('HTTP_USER_AGENT', 'N/A')}, "
-        f"Email={request.POST.get('email', 'N/A')}, "
-        f"HoneypotValue={request.POST.get(settings.HONEYPOT_FIELD_NAME, '')}"
-    )
-    return HttpResponse("Forbidden", status=403)
+# ---------------------------------------------------------------------------
+# Media serving
+# ---------------------------------------------------------------------------
 
 
-def login(request):
-    if request.user.is_authenticated:
-        return redirect("home")
-
-    login_form = EmailOrUsernameAuthenticationForm(request, data=request.POST or None)
-
-    if request.method == "POST":
-        if login_form.is_valid():
-            user = login_form.get_user()
-            auth_login(request, user)
-            next_url = request.GET.get("next", "home")
-            return redirect(next_url)
-
-    return render(
-        request,
-        "login.html",
-        {
-            "login_form": login_form,
-            "registration_enabled": settings.REGISTRATION_ENABLED,
-        },
-    )
+@views.route("/media/<path:filename>")
+def media(filename):
+    media_folder = current_app.config.get("MEDIA_FOLDER", "media")
+    return send_from_directory(os.path.abspath(media_folder), filename)
 
 
-@check_honeypot
-def register(request):
-    """
-    Handle user registration.
-
-    Creates an inactive user and sends an email verification link.
-    The user must click the verification link to activate their account.
-    """
-    if not settings.REGISTRATION_ENABLED:
-        return redirect("login")
-
-    if request.user.is_authenticated:
-        return redirect("home")
-
-    if request.method == "POST":
-        form = RegistrationForm(request.POST)
-        if form.is_valid():
-            # Create inactive user pending email verification
-            user = form.save(commit=False)
-            user.is_active = False
-            user.save()
-
-            # Generate verification token and URL
-            token = default_token_generator.make_token(user)
-            uid = urlsafe_base64_encode(force_bytes(user.pk))
-
-            # Build absolute URL for verification link
-            verification_path = reverse(
-                "verify_email", kwargs={"uidb64": uid, "token": token}
-            )
-            verification_url = request.build_absolute_uri(verification_path)
-
-            # Send verification email
-            _send_templated_email(
-                to_email=user.email,
-                subject="Verificá tu cuenta en GiraLibros",
-                template_name="emails/verification_email",
-                context={
-                    "username": user.username,
-                    "verification_url": verification_url,
-                },
-            )
-
-            # Show confirmation page
-            return render(
-                request,
-                "registration_confirmation.html",
-                {
-                    "email": user.email,
-                },
-            )
-    else:
-        form = RegistrationForm()
-
-    return render(request, "register.html", {"form": form})
+# ---------------------------------------------------------------------------
+# Public pages
+# ---------------------------------------------------------------------------
 
 
-def verify_email(request, uidb64, token):
-    """
-    Verify user's email address using the token sent via email.
-    On success, activate the user and log them in.
-    """
-    if not settings.REGISTRATION_ENABLED:
-        return redirect("login")
+@views.route("/")
+def list_books():
+    # Redirect to profile setup if authenticated but no locations set
+    if current_user.is_authenticated and not current_user.locations:
+        return redirect(url_for("views.profile_edit"))
 
-    try:
-        # Decode the user ID
-        uid = force_str(urlsafe_base64_decode(uidb64))
-        user = User.objects.get(pk=uid)
-    except (TypeError, ValueError, OverflowError, User.DoesNotExist):
-        user = None
+    search = request.args.get("search", "").strip()
+    # Detect filter params by presence in query string (value may be empty string)
+    wanted = "wanted" in request.args
+    photo = "photo" in request.args
+    my_locations = "my_locations" in request.args
+    page = request.args.get("page", 1, type=int)
 
-    if user is not None and default_token_generator.check_token(user, token):
-        # Valid token - activate user and log them in
-        user.is_active = True
-        user.save()
-        auth_login(request, user)
-
-        # Redirect to profile completion (to be implemented)
-        # For now, redirect to home
-        return redirect("home")
-    else:
-        # Invalid or expired token
-        return render(request, "verification_failed.html")
-
-
-class CustomPasswordResetView(PasswordResetView):
-    """
-    Password reset request using Django's built-in view.
-    Configured to use our existing templates and email system.
-    """
-
-    template_name = "password_reset_request.html"
-    form_class = PasswordResetRequestForm
-    email_template_name = "emails/password_reset.txt"
-    html_email_template_name = "emails/password_reset.html"
-    success_url = reverse_lazy("password_reset_done")
-    from_email = settings.DEFAULT_FROM_EMAIL
-
-
-class CustomPasswordResetConfirmView(PasswordResetConfirmView):
-    """
-    Password reset confirmation using Django's built-in view.
-    Configured to use our existing templates and Bulma-styled form.
-    """
-
-    template_name = "password_reset_confirm.html"
-    form_class = CustomSetPasswordForm
-    success_url = reverse_lazy("password_reset_complete")
-
-
-def password_reset_done(request):
-    """Show confirmation that password reset email was sent."""
-    return render(request, "password_reset_sent.html")
-
-
-def password_reset_complete(request):
-    """Show confirmation that password was successfully reset."""
-    return render(request, "password_reset_complete.html")
-
-
-def logout(request):
-    auth_logout(request)
-    return redirect("login")
-
-
-@login_required
-def about(request):
-    """Display about page with site statistics."""
-    from datetime import timedelta
-
-    # Calculate statistics
-    registered_users = User.objects.filter(profile__isnull=False).count()
-    offered_books = OfferedBook.objects.available().count()
-    traded_books = OfferedBook.objects.filter(status=BookStatus.TRADED).count()
-
-    # Requests in the last week
-    one_week_ago = timezone.now() - timedelta(days=7)
-    recent_requests = ExchangeRequest.objects.filter(
-        created_at__gte=one_week_ago
-    ).count()
-
-    return render(
-        request,
-        "about.html",
-        {
-            "registered_users": registered_users,
-            "offered_books": offered_books,
-            "recent_requests": recent_requests,
-            "traded_books": traded_books,
-        },
-    )
-
-
-def list_books(request):
-    """
-    List books with pagination support for infinite scroll.
-
-    Handles both regular page loads and AJAX requests for pagination.
-    AJAX requests (detected via X-Requested-With header) return JSON
-    with HTML fragment and pagination metadata.
-    """
-
-    # Redirect to profile completion if authenticated user hasn't set up their profile
-    if request.user.is_authenticated and not hasattr(request.user, "profile"):
-        return redirect("profile_edit")
-
-    # Parse query params
-    search_query = request.GET.get("search", "").strip()
-    wanted = "wanted" in request.GET
-    photo = "photo" in request.GET
-    my_locations = "my_locations" in request.GET
-
-    # Get books with all filters applied
-    offered_books = OfferedBook.objects.for_user(
-        request.user,
-        search=search_query or None,
+    books = get_books_for_user(
+        current_user,
+        search=search or None,
         wanted=wanted,
         photo=photo,
         my_locations=my_locations,
     )
 
-    # Paginate results
-    page_size = getattr(settings, "BOOKS_PER_PAGE", 20)
-    paginator = Paginator(offered_books, page_size)
-    page_number = request.GET.get("page", 1)
-    page_obj = paginator.get_page(page_number)
+    per_page = current_app.config.get("BOOKS_PER_PAGE", 20)
+    total = len(books)
+    total_pages = max(1, (total + per_page - 1) // per_page)
 
-    # Handle AJAX requests for infinite scroll
+    # Clamp page
+    if page < 1:
+        page = 1
+    elif page > total_pages:
+        page = total_pages
+
+    start = (page - 1) * per_page
+    page_books = books[start : start + per_page]
+
+    has_next = page < total_pages
+    has_offered = False
+    if current_user.is_authenticated:
+        has_offered = any(
+            b.status == BookStatus.NEW for b in current_user.offered
+        )
+
     is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
     if is_ajax:
-        html = render_to_string(
-            "_book_list.html",
-            {
-                "offered_books": page_obj,
-                "user": request.user,
-            },
-            request=request,
-        )
-        return JsonResponse(
-            {
-                "html": html,
-                "has_next": page_obj.has_next(),
-                "next_page": page_obj.next_page_number()
-                if page_obj.has_next()
-                else None,
-            }
-        )
+        html = render_template("_book_list.html", offered_books=page_books)
+        return jsonify({
+            "html": html,
+            "has_next": has_next,
+            "next_page": page + 1 if has_next else None,
+        })
 
-    # Regular page load
-    return render(
-        request,
+    return render_template(
         "home.html",
-        {
-            "offered_books": page_obj,
-            "user": request.user,
-            "has_next": page_obj.has_next(),
-        },
+        offered_books=page_books,
+        total=total,
+        page=page,
+        total_pages=total_pages,
+        has_next=has_next,
+        has_offered=has_offered,
+        search=search,
+        wanted=wanted,
+        photo=photo,
+        my_locations=my_locations,
     )
 
 
-@login_required
-def profile_edit(request):
-    """
-    Create or edit user profile.
-    """
-    # Get existing profile if it exists
-    try:
-        profile = request.user.profile
-        is_new_profile = False
-    except UserProfile.DoesNotExist:
-        profile = None
-        is_new_profile = True
+@views.route("/about/")
+def about():
+    return render_template("about.html")
 
-    if request.method == "POST":
-        form = ProfileForm(request.POST)
 
-        avatar_error = None
-        processed_avatar = None
-        if "profile_picture" in request.FILES:
-            try:
-                processed_avatar = _process_avatar_image(
-                    request.FILES["profile_picture"]
-                )
-            except ValueError as e:
-                avatar_error = str(e)
+# ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
 
-        if form.is_valid() and not avatar_error:
-            # Update User.first_name
-            request.user.first_name = form.cleaned_data["first_name"]
-            request.user.save()
 
-            # Create or update UserProfile
-            if profile:
-                profile.contact_email = form.cleaned_data["email"]
-                profile.alternate_contact = form.cleaned_data["alternate_contact"]
-                profile.about = form.cleaned_data["about"]
-                profile.save()
-            else:
-                profile = UserProfile.objects.create(
-                    user=request.user,
-                    contact_email=form.cleaned_data["email"],
-                    alternate_contact=form.cleaned_data["alternate_contact"],
-                    about=form.cleaned_data["about"],
-                )
+@views.route("/register/", methods=["GET", "POST"])
+def register():
+    if not current_app.config.get("REGISTRATION_ENABLED", True):
+        flash("El registro está deshabilitado.", "warning")
+        return redirect(url_for("views.list_books"))
 
-            if processed_avatar:
-                profile.profile_picture.save(
-                    processed_avatar.name, processed_avatar, save=True
-                )
+    if current_user.is_authenticated:
+        return redirect(url_for("views.list_books"))
 
-            # Update UserLocation entries
-            UserLocation.objects.filter(user=request.user).delete()
-            for area in form.cleaned_data["locations"]:
-                UserLocation.objects.create(user=request.user, area=area)
+    if request.method == "POST" and request.form.get("website"):
+        abort(403)
 
-            # Redirect based on whether this is first-time setup or edit
-            if is_new_profile:
-                return redirect("home")
-            else:
-                return redirect("profile", username=request.user.username)
-    else:
-        # Pre-populate form with existing data
-        initial = {}
-        if profile:
-            initial = {
-                "first_name": request.user.first_name,
-                "email": profile.contact_email,
-                "alternate_contact": profile.alternate_contact,
-                "about": profile.about,
-                "locations": [loc.area for loc in request.user.locations.all()],
-            }
+    form = RegistrationForm()
+    if form.validate_on_submit():
+        username_exists = db.session.execute(
+            db.select(User).where(User.username == form.username.data)
+        ).scalar_one_or_none()
+        email_exists = db.session.execute(
+            db.select(User).where(User.email == form.email.data)
+        ).scalar_one_or_none()
+
+        if username_exists:
+            form.username.errors.append("Este usuario ya está registrado.")
+        elif email_exists:
+            form.email.errors.append("Este email ya está registrado.")
         else:
-            # Default email to registration email and first_name to capitalized username
-            initial = {
-                "first_name": request.user.username.capitalize(),
-                "email": request.user.email,
-            }
-        form = ProfileForm(initial=initial)
+            user = User(username=form.username.data, email=form.email.data)
+            user.set_password(form.password.data)
+            db.session.add(user)
+            db.session.flush()
 
-    return render(
-        request,
+            profile = UserProfile(user_id=user.id, contact_email=user.email)
+            db.session.add(profile)
+            db.session.commit()
+
+            _send_verification_email(user)
+            return render_template(
+                "registration/registration_confirmation.html",
+                email=form.email.data,
+            )
+
+    return render_template("registration/register.html", form=form)
+
+
+@views.route("/login/", methods=["GET", "POST"])
+def login():
+    if current_user.is_authenticated:
+        return redirect(url_for("views.list_books"))
+
+    form = LoginForm()
+    if form.validate_on_submit():
+        identifier = form.email.data.strip()
+        user = db.session.execute(
+            db.select(User).where(
+                db.or_(User.email == identifier, User.username == identifier)
+            )
+        ).scalar_one_or_none()
+
+        if user and user.check_password(form.password.data):
+            if not user.is_active:
+                flash("Tu cuenta no está activa. Verificá tu email.", "warning")
+                return render_template("registration/login.html", form=form)
+            login_user(user, remember=form.remember_me.data)
+            user.last_login = datetime.now(timezone.utc)
+            db.session.commit()
+            next_url = request.args.get("next") or url_for("views.list_books")
+            return redirect(next_url)
+        else:
+            flash("Usuario o contraseña incorrectos.", "danger")
+
+    return render_template("registration/login.html", form=form)
+
+
+@views.route("/logout/", methods=["GET", "POST"])
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for("views.login"))
+
+
+# ---------------------------------------------------------------------------
+# Email verification
+# ---------------------------------------------------------------------------
+
+
+@views.route("/verify-email/<token>/")
+def verify_email(token):
+    serializer = URLSafeTimedSerializer(current_app.config["SECRET_KEY"])
+    try:
+        max_age = 60 * 60 * 24 * 7  # 7 days
+        user_id = serializer.loads(token, salt="email-verification", max_age=max_age)
+    except (SignatureExpired, BadSignature):
+        flash("El enlace de verificación es inválido o ha expirado.", "danger")
+        return redirect(url_for("views.list_books"))
+
+    user = db.session.get(User, user_id)
+    if not user:
+        abort(404)
+
+    user.is_active = True
+    db.session.commit()
+    flash("¡Tu email fue verificado! Ya podés iniciar sesión.", "success")
+    return redirect(url_for("views.login"))
+
+
+# ---------------------------------------------------------------------------
+# Password reset
+# ---------------------------------------------------------------------------
+
+
+@views.route("/password-reset/", methods=["GET", "POST"])
+def password_reset_request():
+    form = PasswordResetRequestForm()
+    if form.validate_on_submit():
+        user = db.session.execute(
+            db.select(User).where(User.email == form.email.data)
+        ).scalar_one_or_none()
+        if user:
+            _send_password_reset_email(user)
+        flash(
+            "Si ese email está registrado, recibirás un enlace para restablecer tu contraseña.",
+            "info",
+        )
+        return redirect(url_for("views.password_reset_done"))
+    return render_template("registration/password_reset.html", form=form)
+
+
+@views.route("/password-reset/done/")
+def password_reset_done():
+    return render_template("registration/password_reset_done.html")
+
+
+@views.route("/password-reset/<token>/", methods=["GET", "POST"])
+def password_reset_confirm(token):
+    serializer = URLSafeTimedSerializer(current_app.config["SECRET_KEY"])
+    try:
+        user_id = serializer.loads(
+            token,
+            salt="password-reset",
+            max_age=current_app.config.get("PASSWORD_RESET_MAX_AGE", 3600),
+        )
+    except (SignatureExpired, BadSignature):
+        flash("El enlace de restablecimiento es inválido o ha expirado.", "danger")
+        return redirect(url_for("views.password_reset_request"))
+
+    user = db.session.get(User, user_id)
+    if not user:
+        abort(404)
+
+    form = PasswordResetForm()
+    if form.validate_on_submit():
+        user.set_password(form.password.data)
+        db.session.commit()
+        flash("Contraseña restablecida. Ahora podés iniciar sesión.", "success")
+        return redirect(url_for("views.password_reset_complete"))
+
+    return render_template("registration/password_reset_confirm.html", form=form, token=token)
+
+
+@views.route("/password-reset/complete/")
+def password_reset_complete():
+    return render_template("registration/password_reset_complete.html")
+
+
+# ---------------------------------------------------------------------------
+# Profile
+# ---------------------------------------------------------------------------
+
+
+@views.route("/profile/edit/", methods=["GET", "POST"])
+@login_required
+def profile_edit():
+    profile = current_user.profile
+    if profile is None:
+        profile = UserProfile(user_id=current_user.id, contact_email=current_user.email)
+        db.session.add(profile)
+        db.session.commit()
+
+    form = ProfileEditForm(obj=profile)
+    if request.method == "GET":
+        form.locations.data = [loc.area for loc in current_user.locations]
+
+    if form.validate_on_submit():
+        if form.website.data:
+            return redirect(url_for("views.list_books"))
+
+        # Detect first-time setup (no locations set yet)
+        is_first_setup = len(current_user.locations) == 0
+
+        # Update User fields from raw form data
+        first_name = request.form.get("first_name", "").strip()
+        if first_name:
+            current_user.first_name = first_name
+
+        # Contact email: accept either WTForms field or raw "email" input
+        contact_email = form.contact_email.data or request.form.get("email", "").strip()
+        if contact_email:
+            profile.contact_email = contact_email
+        profile.alternate_contact = form.alternate_contact.data or request.form.get("alternate_contact", "")
+        profile.about = form.about.data or request.form.get("about", "")
+
+        UserLocation.query.filter_by(user_id=current_user.id).delete()
+        for area in form.locations.data or []:
+            db.session.add(UserLocation(user_id=current_user.id, area=area))
+
+        picture_file = form.profile_picture.data
+        if picture_file and picture_file.filename:
+            filename = _save_profile_picture(picture_file, current_user.id)
+            if filename:
+                if profile.profile_picture:
+                    _delete_media_file(profile.profile_picture)
+                profile.profile_picture = filename
+
+        db.session.commit()
+        flash("Perfil actualizado.", "success")
+        if is_first_setup:
+            return redirect(url_for("views.list_books"))
+        return redirect(url_for("views.profile", username=current_user.username))
+
+    return render_template(
         "profile_edit.html",
-        {
-            "form": form,
-            "avatar_error": avatar_error if request.method == "POST" else None,
-        },
+        form=form,
+        profile=profile,
+        locations=current_user.locations,
     )
 
 
+@views.route("/profile/<username>/")
 @login_required
-def profile(request, username):
-    """
-    View user profile.
-    """
-    from django.shortcuts import get_object_or_404
+def profile(username):
+    user = db.session.execute(
+        db.select(User).where(User.username == username)
+    ).scalar_one_or_none()
+    if not user:
+        abort(404)
 
-    profile_user = get_object_or_404(User, username=username)
-    is_own_profile = request.user == profile_user
+    books = get_books_for_profile(user, current_user)
+    traded = get_traded_by(user)
+    sent = get_recent_sent_requests(user)
+    received = get_recent_received_requests(user)
+    has_offered = any(b.status == BookStatus.NEW for b in books)
+    is_own_profile = current_user.is_authenticated and current_user.id == user.id
 
-    # Get offered books (handles reuqests annotation if another user)
-    offered_books = OfferedBook.objects.for_profile(profile_user, request.user)
-    wanted_books = profile_user.wanted.all()
+    wanted_books = (
+        db.session.execute(
+            db.select(WantedBook).where(WantedBook.user_id == user.id).order_by(WantedBook.created_at.desc())
+        ).scalars().all()
+        if is_own_profile else []
+    )
 
-    traded_books_count = OfferedBook.objects.traded_by(profile_user).count()
-    sent_requests = None
-    received_requests = None
-    traded_books = None
-    if is_own_profile:
-        sent_requests = ExchangeRequest.objects.recent_sent_by(profile_user)
-        received_requests = ExchangeRequest.objects.recent_received_by(profile_user)
-        traded_books = OfferedBook.objects.traded_by(profile_user)
-
-    return render(
-        request,
+    return render_template(
         "profile.html",
-        {
-            "profile_user": profile_user,
-            "is_own_profile": is_own_profile,
-            "offered_books": offered_books,
-            "wanted_books": wanted_books,
-            "traded_books": traded_books,
-            "traded_books_count": traded_books_count,
-            "sent_requests": sent_requests,
-            "received_requests": received_requests,
-            "books_per_page": settings.BOOKS_PER_PAGE,
-        },
+        profile_user=user,
+        offered_books=books,
+        traded_books=traded,
+        sent_requests=sent,
+        received_requests=received,
+        has_offered=has_offered,
+        is_own_profile=is_own_profile,
+        wanted_books=wanted_books,
+        traded_books_count=len(traded),
     )
 
 
+# ---------------------------------------------------------------------------
+# Offered books
+# ---------------------------------------------------------------------------
+
+
+@views.route("/my-books/", methods=["GET", "POST"])
 @login_required
-def my_offered_books(request, book_id=None):
-    """Display form to add/edit offered books and list of existing books."""
-    # Determine if editing or creating
-    book = (
-        get_object_or_404(OfferedBook, id=book_id, user=request.user)
-        if book_id
-        else None
-    )
+def my_offered_books():
+    editing_book = None
+    book_id = request.args.get("book_id", type=int)
+    if book_id:
+        editing_book = db.session.get(OfferedBook, book_id)
+        if editing_book and editing_book.user_id != current_user.id:
+            abort(403)
 
-    if request.method == "POST":
-        form = OfferedBookForm(request.POST, request.FILES, instance=book)
-        if form.is_valid():
-            book = form.save(commit=False)
-            if not book.user_id:
-                book.user = request.user
+    form = OfferedBookForm(obj=editing_book)
 
-            # Process cover image if uploaded
-            if "cover_image" in request.FILES:
-                try:
-                    processed_image = _process_book_cover_image(
-                        request.FILES["cover_image"]
-                    )
-                    book.cover_image.save(
-                        processed_image.name, processed_image, save=False
-                    )
-                    book.cover_uploaded_at = timezone.now()
-                except ValueError as e:
-                    form.add_error("cover_image", str(e))
+    if form.validate_on_submit():
+        if book_id and editing_book:
+            editing_book.title = form.title.data
+            editing_book.author = form.author.data
+            editing_book.notes = form.notes.data
+            editing_book._set_normalized()
 
-            # Only save if no errors were added during processing
-            if not form.errors:
-                book.save()
-                return redirect("my_offered")
-    else:
-        # GET request
-        form = OfferedBookForm(instance=book)
+            cover_file = form.cover_image.data
+            if cover_file and cover_file.filename:
+                filename = _save_book_cover(cover_file, editing_book.id)
+                if filename:
+                    if editing_book.cover_image:
+                        _delete_media_file(editing_book.cover_image)
+                    editing_book.cover_image = filename
+                    editing_book.cover_uploaded_at = datetime.now(timezone.utc)
 
-    # Render template (for both GET and POST with errors)
-    return render(
-        request,
-        "my_offered_books.html",
-        {
-            "form": form,
-            "offered_books": OfferedBook.objects.available()
-            .filter(user=request.user)
-            .order_by("-created_at"),
-            "editing_book_id": book_id,
-        },
-    )
-
-
-@login_required
-def delete_offered_book(request, book_id):
-    """Mark an offered book as deleted (AJAX endpoint)."""
-    if request.method != "POST":
-        return JsonResponse({"error": "Method not allowed"}, status=405)
-
-    book = get_object_or_404(OfferedBook, id=book_id, user=request.user)
-    book.delete()
-
-    return JsonResponse({"success": True})
-
-
-@login_required
-def trade_offered_book(request, book_id):
-    """Mark an offered book as traded (AJAX endpoint)."""
-    if request.method != "POST":
-        return JsonResponse({"error": "Method not allowed"}, status=405)
-
-    book = get_object_or_404(OfferedBook, id=book_id, user=request.user)
-    book.trade()
-
-    return JsonResponse({"success": True})
-
-
-@login_required
-def reserve_offered_book(request, book_id):
-    """Toggle reservation status of an offered book (AJAX endpoint)."""
-    if request.method != "POST":
-        return JsonResponse({"error": "Method not allowed"}, status=405)
-
-    book = get_object_or_404(OfferedBook, id=book_id, user=request.user)
-    book.reserve()
-
-    return JsonResponse({"success": True})
-
-
-@login_required
-def like_book(request, book_id):
-    """Toggle like on an offered book (AJAX endpoint)."""
-    if request.method != "POST":
-        return JsonResponse({"error": "Method not allowed"}, status=405)
-
-    book = get_object_or_404(OfferedBook.objects.available(), pk=book_id)
-
-    if book.user == request.user:
-        return JsonResponse(
-            {"error": "No podés dar like a tus propios libros"}, status=400
-        )
-
-    liked = book.toggle_like(request.user)
-    return JsonResponse({"liked": liked})
-
-
-@login_required
-def my_wanted_books(request):
-    """Display form to add wanted books and list of existing books."""
-    if request.method == "POST":
-        form = WantedBookForm(request.POST)
-        if form.is_valid():
-            book = form.save(commit=False)
-            book.user = request.user
-            book.save()
-            return redirect("my_wanted")
-    else:
-        form = WantedBookForm()
-
-    return render(
-        request,
-        "my_wanted_books.html",
-        {
-            "form": form,
-            "wanted_books": WantedBook.objects.filter(user=request.user).order_by(
-                "-created_at"
-            ),
-        },
-    )
-
-
-@login_required
-def delete_wanted_book(request, book_id):
-    """Delete a wanted book (AJAX endpoint)."""
-    if request.method != "POST":
-        return JsonResponse({"error": "Method not allowed"}, status=405)
-
-    book = get_object_or_404(WantedBook, id=book_id, user=request.user)
-    book.delete()
-
-    return JsonResponse({"success": True})
-
-
-@login_required
-def request_exchange(request, book_id):
-    """
-    Create an exchange request for a book. Sends email notification to book owner.
-    """
-    if request.method != "POST":
-        return JsonResponse({"error": "Method not allowed"}, status=405)
-
-    from datetime import timedelta
-
-    from django.utils import timezone
-
-    # Get the book
-    try:
-        book = OfferedBook.objects.available().select_related("user").get(pk=book_id)
-    except OfferedBook.DoesNotExist:
-        return JsonResponse({"error": "Libro no encontrado"}, status=404)
-
-    # Check if user is trying to request their own book
-    if book.user == request.user:
-        return JsonResponse(
-            {"error": "No podés solicitar tus propios libros"}, status=400
-        )
-
-    # Check if user has any offered books
-    if not request.user.offered.available().exists():
-        my_books_url = reverse("my_offered")
-        return JsonResponse(
-            {
-                "error": f'Antes de enviar una solitud tenés que <a href="{my_books_url}">agregar tus libros ofrecidos</a>.'
-            },
-            status=400,
-        )
-
-    # Check if user already requested this book recently
-    cutoff_date = timezone.now() - timedelta(days=settings.EXCHANGE_REQUEST_EXPIRY_DAYS)
-
-    existing_request = ExchangeRequest.objects.filter(
-        from_user=request.user, offered_book=book, created_at__gte=cutoff_date
-    ).first()
-
-    if existing_request:
-        return JsonResponse(
-            {"error": "Ya solicitaste este libro recientemente"}, status=400
-        )
-
-    # Check daily request limit
-    last_24h = timezone.now() - timedelta(hours=24)
-
-    requests_today = ExchangeRequest.objects.filter(
-        from_user=request.user, created_at__gte=last_24h
-    ).count()
-
-    if requests_today >= settings.EXCHANGE_REQUEST_DAILY_LIMIT:
-        return JsonResponse(
-            {"error": "Llegaste al límite de pedidos por hoy, probá de nuevo mañana."},
-            status=429,
-        )
-
-    # Create exchange request and send email atomically
-    try:
-        with transaction.atomic():
-            exchange_request = ExchangeRequest.objects.create(
-                from_user=request.user,
-                to_user=book.user,
-                offered_book=book,
-                book_title=book.title,
-                book_author=book.author,
-            )
-            book.add_like(request.user)
-
-            # Build absolute URL for requester's profile
-            profile_path = reverse(
-                "profile", kwargs={"username": request.user.username}
-            )
-            requester_profile_url = request.build_absolute_uri(profile_path)
-
-            _send_templated_email(
-                to_email=book.user.profile.contact_email,
-                subject="📚 ¡Tenés una solicitud en GiraLibros.com!",
-                template_name="emails/exchange_request",
-                context={
-                    "requester": request.user,
-                    "book": book,
-                    "exchange_request": exchange_request,
-                    "requester_profile_url": requester_profile_url,
-                },
-                reply_to=request.user.profile.contact_email,
-            )
-    except Exception:
-        # If email fails, transaction is rolled back automatically
-        logger.exception(
-            f"Failed to send exchange request email for book {book_id} to user {book.user.id}"
-        )
-        return JsonResponse(
-            {"error": "Hubo un error al procesar tu solicitud, probá más tarde."},
-            status=500,
-        )
-
-    return JsonResponse(
-        {
-            "message": f"Le enviamos tu solicitud de intercambio a <b>{book.user.username}</b>.<br/>Te va a contactar si le interesa alguno de tus libros."
-        },
-        status=201,
-    )
-
-
-@login_required
-def upload_book_photo(request, book_id):
-    """
-    Handle book cover photo upload with thumbnail generation.
-    """
-    # Get the book and verify ownership
-    book = get_object_or_404(OfferedBook, id=book_id, user=request.user)
-
-    if request.method == "POST":
-        # Validate file was uploaded
-        if "cover_image" not in request.FILES:
-            return HttpResponseBadRequest("No image file provided")
-
-        uploaded_file = request.FILES["cover_image"]
-
-        try:
-            # Validate and process the uploaded image
-            thumbnail = _process_book_cover_image(uploaded_file)
-
-            # Save to model
-            book.cover_image.save(thumbnail.name, thumbnail, save=False)
-            book.cover_uploaded_at = timezone.now()
-            book.save()
-
-            # Return JSON response for AJAX request
-            return JsonResponse({"success": True, "image_url": book.cover_image.url})
-
-        except ValueError as e:
-            return HttpResponseBadRequest(str(e))
-        except Exception as e:
-            logger.error(f"Error processing image upload: {e}")
-            return HttpResponseBadRequest("Error processing image")
-
-    return HttpResponseBadRequest("Method not allowed")
-
-
-def _process_uploaded_image(
-    uploaded_file,
-    *,
-    max_size,
-    allowed_types,
-    max_width,
-    max_height,
-    jpeg_quality,
-    filename_suffix,
-    crop_aspect=None,
-):
-    """
-    Validate and process an uploaded image file.
-    Returns InMemoryUploadedFile ready to save, or raises ValueError on validation errors.
-
-    If crop_aspect (width/height) is given, center-crops to that ratio before resizing.
-    """
-    if uploaded_file.size > max_size:
-        raise ValueError(
-            f"Image file too large (max {max_size // (1024 * 1024):.0f}MB)"
-        )
-
-    if uploaded_file.content_type not in allowed_types:
-        raise ValueError("Invalid image format")
-
-    try:
-        image = Image.open(uploaded_file)
-    except Exception as e:
-        logger.warning(f"PIL cannot identify image file: {uploaded_file.name} - {e}")
-        raise ValueError("The uploaded file is not a valid image or is corrupt")
-
-    image = ImageOps.exif_transpose(image) or image
-
-    if image.mode in ("RGBA", "P"):
-        image = image.convert("RGB")
-
-    if crop_aspect is not None:
-        img_width, img_height = image.size
-        img_aspect = img_width / img_height
-        if img_aspect > crop_aspect:
-            new_width = int(img_height * crop_aspect)
-            left = (img_width - new_width) // 2
-            image = image.crop((left, 0, left + new_width, img_height))
+            db.session.commit()
+            flash("Libro actualizado.", "success")
         else:
-            new_height = int(img_width / crop_aspect)
-            top = (img_height - new_height) // 2
-            image = image.crop((0, top, img_width, top + new_height))
+            book = OfferedBook(
+                user_id=current_user.id,
+                title=form.title.data,
+                author=form.author.data,
+                notes=form.notes.data or "",
+            )
+            book._set_normalized()
+            db.session.add(book)
+            db.session.flush()
 
-    image.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
+            cover_file = form.cover_image.data
+            if cover_file and cover_file.filename:
+                filename = _save_book_cover(cover_file, book.id)
+                if filename:
+                    book.cover_image = filename
+                    book.cover_uploaded_at = datetime.now(timezone.utc)
 
-    output = BytesIO()
-    image.save(output, format="JPEG", quality=jpeg_quality, optimize=True)
-    output.seek(0)
+            db.session.commit()
+            flash("Libro agregado.", "success")
 
-    return InMemoryUploadedFile(
-        output,
-        "ImageField",
-        f"{uploaded_file.name.split('.')[0]}{filename_suffix}.jpg",
-        "image/jpeg",
-        output.getbuffer().nbytes,
-        None,
+        return redirect(url_for("views.my_offered_books"))
+
+    user_books = (
+        db.session.execute(
+            db.select(OfferedBook)
+            .where(
+                OfferedBook.user_id == current_user.id,
+                OfferedBook.status.notin_([BookStatus.DELETED, BookStatus.TRADED]),
+            )
+            .order_by(OfferedBook.created_at.desc())
+        )
+        .scalars()
+        .all()
+    )
+
+    return render_template(
+        "my_offered_books.html",
+        form=form,
+        offered_books=user_books,
+        editing_book=editing_book,
     )
 
 
-def _process_book_cover_image(uploaded_file):
-    """
-    Validate and process uploaded book cover image.
-    Returns InMemoryUploadedFile ready to save, or raises ValueError on validation errors.
-    """
-    return _process_uploaded_image(
-        uploaded_file,
-        max_size=settings.BOOK_COVER_MAX_SIZE,
-        allowed_types=settings.BOOK_COVER_ALLOWED_TYPES,
-        max_width=settings.BOOK_COVER_THUMBNAIL_MAX_WIDTH,
-        max_height=settings.BOOK_COVER_THUMBNAIL_MAX_HEIGHT,
-        jpeg_quality=settings.BOOK_COVER_JPEG_QUALITY,
-        filename_suffix="_thumb",
-        crop_aspect=2 / 3,
+@views.route("/my-books/upload-photo/<int:book_id>/", methods=["POST"])
+@login_required
+def upload_book_photo(book_id):
+    book = db.session.get(OfferedBook, book_id)
+    if not book or book.user_id != current_user.id:
+        abort(403)
+
+    photo = request.files.get("cover_image")
+    if not photo or not photo.filename:
+        return jsonify({"error": "No se envió ningún archivo."}), 400
+
+    filename = _save_book_cover(photo, book_id)
+    if not filename:
+        return jsonify({"error": "Formato de imagen inválido."}), 400
+
+    if book.cover_image:
+        _delete_media_file(book.cover_image)
+
+    book.cover_image = filename
+    book.cover_uploaded_at = datetime.now(timezone.utc)
+    db.session.commit()
+
+    return jsonify({"image_url": book.cover_image_url})
+
+
+@views.route("/my-books/delete/<int:book_id>/", methods=["POST"])
+@login_required
+def delete_offered_book(book_id):
+    book = db.session.get(OfferedBook, book_id)
+    if not book or book.user_id != current_user.id:
+        abort(403)
+    book.delete()
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return jsonify({"ok": True}), 200
+    flash("Libro eliminado.", "success")
+    return redirect(url_for("views.my_offered_books"))
+
+
+@views.route("/my-books/trade/<int:book_id>/", methods=["POST"])
+@login_required
+def trade_offered_book(book_id):
+    book = db.session.get(OfferedBook, book_id)
+    if not book or book.user_id != current_user.id:
+        abort(403)
+    book.trade()
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return jsonify({"ok": True}), 200
+    flash("Libro marcado como intercambiado.", "success")
+    return redirect(url_for("views.my_offered_books"))
+
+
+@views.route("/my-books/reserve/<int:book_id>/", methods=["POST"])
+@login_required
+def reserve_offered_book(book_id):
+    book = db.session.get(OfferedBook, book_id)
+    if not book or book.user_id != current_user.id:
+        abort(403)
+    book.reserve()
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return jsonify({"ok": True}), 200
+    return redirect(url_for("views.my_offered_books"))
+
+
+# ---------------------------------------------------------------------------
+# Wanted books
+# ---------------------------------------------------------------------------
+
+
+@views.route("/my-wanted/", methods=["GET", "POST"])
+@login_required
+def my_wanted_books():
+    form = WantedBookForm()
+    if form.validate_on_submit():
+        book = WantedBook(
+            user_id=current_user.id,
+            title=form.title.data or "",
+            author=form.author.data,
+        )
+        book._set_normalized()
+        db.session.add(book)
+        db.session.commit()
+        flash("Libro buscado agregado.", "success")
+        return redirect(url_for("views.my_wanted_books"))
+
+    user_books = (
+        db.session.execute(
+            db.select(WantedBook)
+            .where(WantedBook.user_id == current_user.id)
+            .order_by(WantedBook.created_at.desc())
+        )
+        .scalars()
+        .all()
     )
+    return render_template("my_wanted_books.html", form=form, wanted_books=user_books)
 
 
-def _process_avatar_image(uploaded_file):
-    """
-    Validate and process uploaded profile picture.
-    Returns InMemoryUploadedFile ready to save, or raises ValueError on validation errors.
-    Resizes to fit within max dimension while preserving aspect ratio; CSS handles the square crop.
-    """
-    return _process_uploaded_image(
-        uploaded_file,
-        max_size=settings.PROFILE_PICTURE_MAX_SIZE,
-        allowed_types=settings.PROFILE_PICTURE_ALLOWED_TYPES,
-        max_width=settings.PROFILE_PICTURE_MAX_DIMENSION,
-        max_height=settings.PROFILE_PICTURE_MAX_DIMENSION,
-        jpeg_quality=settings.PROFILE_PICTURE_JPEG_QUALITY,
-        filename_suffix="_avatar",
+@views.route("/my-wanted/delete/<int:book_id>/", methods=["POST"])
+@login_required
+def delete_wanted_book(book_id):
+    book = db.session.get(WantedBook, book_id)
+    if not book or book.user_id != current_user.id:
+        abort(403)
+    db.session.delete(book)
+    db.session.commit()
+    flash("Libro eliminado.", "success")
+    return redirect(url_for("views.my_wanted_books"))
+
+
+# ---------------------------------------------------------------------------
+# Exchange requests
+# ---------------------------------------------------------------------------
+
+
+@views.route("/request-exchange/<int:book_id>/", methods=["POST"])
+@login_required
+def request_exchange(book_id):
+    book = db.session.get(OfferedBook, book_id)
+    if not book or book.status in [BookStatus.DELETED, BookStatus.TRADED]:
+        abort(404)
+    if book.user_id == current_user.id:
+        abort(403)
+
+    # Require at least one offered book
+    requester_available = [b for b in current_user.offered if b.status == BookStatus.NEW]
+    if not requester_available:
+        return jsonify({"error": "Tenés que agregar tus libros antes de enviar solicitudes."}), 400
+
+    # Check daily limit
+    daily_limit = current_app.config.get("EXCHANGE_REQUEST_DAILY_LIMIT", 25)
+    today_count = db.session.execute(
+        db.select(db.func.count(ExchangeRequest.id)).where(
+            ExchangeRequest.from_user_id == current_user.id,
+            ExchangeRequest.created_at >= datetime.now(timezone.utc).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ),
+        )
+    ).scalar()
+    if today_count >= daily_limit:
+        return jsonify({"error": "Alcanzaste el límite de pedidos diario."}), 429
+
+    # Check if already requested (within expiry window)
+    expiry_days = current_app.config.get("EXCHANGE_REQUEST_EXPIRY_DAYS", 15)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=expiry_days)
+    already = db.session.execute(
+        db.select(ExchangeRequest).where(
+            ExchangeRequest.from_user_id == current_user.id,
+            ExchangeRequest.offered_book_id == book.id,
+            ExchangeRequest.created_at >= cutoff,
+        )
+    ).scalar_one_or_none()
+    if already:
+        return jsonify({"error": "Ya enviaste una solicitud para este libro."}), 400
+
+    er = ExchangeRequest(
+        from_user_id=current_user.id,
+        to_user_id=book.user_id,
+        offered_book_id=book.id,
+        book_title=book.title,
+        book_author=book.author,
     )
+    db.session.add(er)
+    db.session.commit()
+
+    try:
+        _send_exchange_request_email(er)
+    except Exception:
+        db.session.delete(er)
+        db.session.commit()
+        return jsonify({"error": "Error enviando el email de solicitud."}), 500
+
+    return jsonify({"message": "Solicitud de intercambio enviada."}), 201
 
 
-def _send_templated_email(
-    to_email, subject, template_name, context=None, reply_to=None
-):
-    """
-    Send multipart email with HTML and plain text versions.
+# ---------------------------------------------------------------------------
+# Likes
+# ---------------------------------------------------------------------------
 
-    template_name should be the base path without extension (e.g., "emails/welcome").
-    Both .txt and .html versions will be rendered and sent.
-    """
-    if context is None:
-        context = {}
 
-    if isinstance(to_email, str):
-        to_email = [to_email]
+@views.route("/like/<int:book_id>/", methods=["POST"])
+@login_required
+def like_book(book_id):
+    book = db.session.get(OfferedBook, book_id)
+    if not book:
+        abort(404)
+    is_liked = book.toggle_like(current_user)
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return jsonify({"likes": book.likes, "liked": is_liked})
+    return redirect(request.referrer or url_for("views.list_books"))
 
-    if isinstance(reply_to, str):
-        reply_to = [reply_to]
 
-    text_message = render_to_string(f"{template_name}.txt", context)
-    html_message = render_to_string(f"{template_name}.html", context)
+# ---------------------------------------------------------------------------
+# Email helpers
+# ---------------------------------------------------------------------------
 
-    email = EmailMultiAlternatives(
-        subject=subject,
-        body=text_message,
-        from_email=settings.DEFAULT_FROM_EMAIL,
-        to=to_email,
-        reply_to=reply_to,
+
+def _get_serializer():
+    return URLSafeTimedSerializer(current_app.config["SECRET_KEY"])
+
+
+def _send_verification_email(user):
+    token = _get_serializer().dumps(user.id, salt="email-verification")
+    verification_url = url_for("views.verify_email", token=token, _external=True)
+    msg = Message(
+        subject="Verificá tu email en GiraLibros",
+        recipients=[user.email],
+        html=render_template(
+            "emails/verification_email.html",
+            username=user.username,
+            verification_url=verification_url,
+        ),
+        body=render_template(
+            "emails/verification_email.txt",
+            username=user.username,
+            verification_url=verification_url,
+        ),
     )
-    email.attach_alternative(html_message, "text/html")
+    mail.send(msg)
 
-    return email.send(fail_silently=False)
+
+def _send_password_reset_email(user):
+    token = _get_serializer().dumps(user.id, salt="password-reset")
+    reset_url = url_for("views.password_reset_confirm", token=token, _external=True)
+    msg = Message(
+        subject="Restablecé tu contraseña en GiraLibros",
+        recipients=[user.email],
+        html=render_template(
+            "emails/password_reset.html",
+            username=user.username,
+            reset_url=reset_url,
+        ),
+        body=render_template(
+            "emails/password_reset.txt",
+            username=user.username,
+            reset_url=reset_url,
+        ),
+    )
+    mail.send(msg)
+
+
+def _send_exchange_request_email(exchange_request):
+    to_user = exchange_request.to_user
+    requester = exchange_request.from_user
+    book = exchange_request.offered_book
+
+    requester_books = [
+        b for b in requester.offered if b.status == BookStatus.NEW
+    ]
+    requester_profile = requester.profile
+
+    msg = Message(
+        subject=f"Solicitud de intercambio de {requester.username}",
+        recipients=[to_user.email],
+        html=render_template(
+            "emails/exchange_request.html",
+            to_user=to_user,
+            requester=requester,
+            requester_books=requester_books,
+            requester_profile=requester_profile,
+            book=book,
+        ),
+        body=render_template(
+            "emails/exchange_request.txt",
+            to_user=to_user,
+            requester=requester,
+            requester_books=requester_books,
+            requester_profile=requester_profile,
+            book=book,
+        ),
+    )
+    mail.send(msg)
+
+
+# ---------------------------------------------------------------------------
+# File-handling helpers
+# ---------------------------------------------------------------------------
+
+
+def _save_book_cover(file_storage, book_id):
+    """Save book cover image, resizing thumbnail. Returns relative path or None."""
+    from PIL import Image
+    import io
+
+    max_size = current_app.config.get("BOOK_COVER_MAX_SIZE", 10 * 1024 * 1024)
+    allowed = current_app.config.get(
+        "BOOK_COVER_ALLOWED_TYPES", ["image/jpeg", "image/png", "image/webp"]
+    )
+    content = file_storage.read()
+    if len(content) > max_size:
+        return None
+
+    content_type = file_storage.content_type or ""
+    if content_type not in allowed:
+        # Try guessing from filename extension
+        ext = (file_storage.filename or "").rsplit(".", 1)[-1].lower()
+        if ext not in ("jpg", "jpeg", "png", "webp"):
+            return None
+        content_type = f"image/{ext}" if ext != "jpg" else "image/jpeg"
+
+    try:
+        img = Image.open(io.BytesIO(content))
+        img = img.convert("RGB")
+        max_w = current_app.config.get("BOOK_COVER_THUMBNAIL_MAX_WIDTH", 400)
+        max_h = current_app.config.get("BOOK_COVER_THUMBNAIL_MAX_HEIGHT", 600)
+        img.thumbnail((max_w, max_h), Image.LANCZOS)
+
+        folder = os.path.join(current_app.config.get("MEDIA_FOLDER", "media"), "covers")
+        os.makedirs(folder, exist_ok=True)
+        filename = f"cover_{book_id}.jpg"
+        path = os.path.join(folder, filename)
+        quality = current_app.config.get("BOOK_COVER_JPEG_QUALITY", 85)
+        img.save(path, "JPEG", quality=quality)
+        return f"covers/{filename}"
+    except Exception:
+        return None
+
+
+def _save_profile_picture(file_storage, user_id):
+    """Save profile picture, resizing to square. Returns relative path or None."""
+    from PIL import Image
+    import io
+
+    max_size = current_app.config.get("PROFILE_PICTURE_MAX_SIZE", 5 * 1024 * 1024)
+    allowed = current_app.config.get(
+        "PROFILE_PICTURE_ALLOWED_TYPES", ["image/jpeg", "image/png", "image/webp"]
+    )
+    content = file_storage.read()
+    if len(content) > max_size:
+        return None
+
+    content_type = file_storage.content_type or ""
+    if content_type not in allowed:
+        ext = (file_storage.filename or "").rsplit(".", 1)[-1].lower()
+        if ext not in ("jpg", "jpeg", "png", "webp"):
+            return None
+
+    try:
+        img = Image.open(io.BytesIO(content))
+        img = img.convert("RGB")
+        max_dim = current_app.config.get("PROFILE_PICTURE_MAX_DIMENSION", 300)
+        img.thumbnail((max_dim, max_dim), Image.LANCZOS)
+
+        folder = os.path.join(current_app.config.get("MEDIA_FOLDER", "media"), "profile_pics")
+        os.makedirs(folder, exist_ok=True)
+        filename = f"profile_{user_id}.jpg"
+        path = os.path.join(folder, filename)
+        quality = current_app.config.get("PROFILE_PICTURE_JPEG_QUALITY", 85)
+        img.save(path, "JPEG", quality=quality)
+        return f"profile_pics/{filename}"
+    except Exception:
+        return None
+
+
+def _delete_media_file(relative_path):
+    """Delete a file from the media folder silently."""
+    if not relative_path:
+        return
+    try:
+        media_folder = current_app.config.get("MEDIA_FOLDER", "media")
+        path = os.path.normpath(os.path.join(media_folder, relative_path))
+        if path.startswith(media_folder) and os.path.isfile(path):
+            os.remove(path)
+    except Exception:
+        pass

@@ -1,340 +1,189 @@
+import os
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
-from django.conf import settings
-from django.contrib.auth.models import User
-from django.db import models
-from django.db.models import BooleanField, Exists, F, OuterRef, Q, Value
-from django.db.models.functions import Coalesce, Greatest
-from django.utils import timezone
+from flask import current_app
+from flask_login import UserMixin
+from werkzeug.security import check_password_hash, generate_password_hash
+
+from extensions import db
 
 
-class UserProfile(models.Model):
-    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="profile")
-    # user.username
-    # user.email
+class User(UserMixin, db.Model):
+    __tablename__ = "user"
 
-    contact_email = models.EmailField(
-        help_text="The email the user wants to share with others when sending an exchange request."
-    )
-    alternate_contact = models.CharField(
-        blank=True,
-        max_length=200,
-        help_text="Some alternative means of contact for exchanging books, e.g. WhatsApp phone number.",
-    )
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(150), unique=True, nullable=False, index=True)
+    email = db.Column(db.String(254), unique=True, nullable=False, index=True)
+    first_name = db.Column(db.String(150), default="")
+    password_hash = db.Column(db.String(256), nullable=False, default="")
+    is_active = db.Column(db.Boolean, default=False, nullable=False)
+    is_staff = db.Column(db.Boolean, default=False, nullable=False)
+    date_joined = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    last_login = db.Column(db.DateTime, nullable=True)
 
-    about = models.TextField(
-        blank=True,
-        max_length=200,
-        help_text="Miscelaneous notes to be displayed on the user public profile and on exchange requests.",
-    )
-    profile_picture = models.ImageField(
-        upload_to="profile_pictures/",
-        blank=True,
-        null=True,
-    )
+    profile = db.relationship("UserProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    locations = db.relationship("UserLocation", back_populates="user", cascade="all, delete-orphan")
+    offered = db.relationship("OfferedBook", back_populates="user", foreign_keys="OfferedBook.user_id")
+    wanted = db.relationship("WantedBook", back_populates="user", cascade="all, delete-orphan")
+    likes = db.relationship("Like", back_populates="user", cascade="all, delete-orphan")
+    sent_requests = db.relationship("ExchangeRequest", back_populates="from_user", foreign_keys="ExchangeRequest.from_user_id")
+    received_requests = db.relationship("ExchangeRequest", back_populates="to_user", foreign_keys="ExchangeRequest.to_user_id")
+
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
+
+    def __repr__(self):
+        return f"<User {self.username}>"
+
+
+class UserProfile(db.Model):
+    __tablename__ = "user_profile"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), unique=True, nullable=False)
+    contact_email = db.Column(db.String(254), nullable=False)
+    alternate_contact = db.Column(db.String(200), default="")
+    about = db.Column(db.Text, default="")
+    profile_picture = db.Column(db.String(500), nullable=True)
+
+    user = db.relationship("User", back_populates="profile")
 
     @property
-    def is_full_user(self):
-        """User is considered full if they have been registered for more than 7 days, have sent requests, and have received requests."""
-        registered_more_than_7_days = (
-            self.user.date_joined < timezone.now() - timedelta(days=7)
-        )
-        has_sent_requests = self.user.sent_requests.exists()
-        has_received_requests = self.user.received_requests.exists()
-        return (
-            registered_more_than_7_days and has_sent_requests and has_received_requests
-        )
+    def profile_picture_url(self):
+        if self.profile_picture:
+            return f"/media/{self.profile_picture}"
+        return None
 
 
-class LocationArea(models.TextChoices):
-    CABA_CENTRO = "CABA_CENTRO", "CABA Centro"
-    CABA_SUR = "CABA_SUR", "CABA Sur"
-    CABA_NORTE = "CABA_NORTE", "CABA Norte"
-    GBA_NORTE = "GBA_NORTE", "GBA Norte"
-    GBA_OESTE = "GBA_OESTE", "GBA Oeste"
-    GBA_SUR = "GBA_SUR", "GBA Sur"
+class LocationArea:
+    CABA_CENTRO = "CABA_CENTRO"
+    CABA_SUR = "CABA_SUR"
+    CABA_NORTE = "CABA_NORTE"
+    GBA_NORTE = "GBA_NORTE"
+    GBA_OESTE = "GBA_OESTE"
+    GBA_SUR = "GBA_SUR"
+
+    choices = [
+        ("CABA_CENTRO", "CABA Centro"),
+        ("CABA_SUR", "CABA Sur"),
+        ("CABA_NORTE", "CABA Norte"),
+        ("GBA_NORTE", "GBA Norte"),
+        ("GBA_OESTE", "GBA Oeste"),
+        ("GBA_SUR", "GBA Sur"),
+    ]
+
+    @classmethod
+    def display(cls, value):
+        return dict(cls.choices).get(value, value)
 
 
-class BookStatus(models.TextChoices):
-    NEW = "NEW", "New"
-    RESERVED = "RESERVED", "Reserved"
-    DELETED = "DELETED", "Deleted"
-    TRADED = "TRADED", "Traded"
+class BookStatus:
+    NEW = "NEW"
+    RESERVED = "RESERVED"
+    DELETED = "DELETED"
+    TRADED = "TRADED"
 
 
-class UserLocation(models.Model):
-    """
-    Represent a region where users offer to make exchanges, which affects which other user's books
-    are visible to them.
-    """
+class UserLocation(db.Model):
+    __tablename__ = "user_location"
+    __table_args__ = (db.UniqueConstraint("user_id", "area", name="unique_user_area"),)
 
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="locations")
-    area = models.CharField(max_length=20, choices=LocationArea.choices)
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    area = db.Column(db.String(20), nullable=False)
 
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=["user", "area"], name="unique_user_area")
-        ]
+    user = db.relationship("User", back_populates="locations")
+
+    def get_area_display(self):
+        return LocationArea.display(self.area)
 
     def __str__(self):
-        return f"{self.user.username} - {self.get_area_display()}"
+        return f"{self.user.username} - {LocationArea.display(self.area)}"
 
 
-# abstract
-class BaseBook(models.Model):
-    title = models.CharField(max_length=200)
-    author = models.CharField(max_length=200)
-    created_at = models.DateTimeField(auto_now_add=True)
+def _normalize_spanish(text):
+    """Normalize text for search: lowercase, remove accents, clean punctuation."""
+    text = text.lower()
+    for old, new in {"á": "a", "é": "e", "í": "i", "ó": "o", "ú": "u", "ü": "u"}.items():
+        text = text.replace(old, new)
+    text = text.replace("100", "cien")
+    text = re.sub(r"[^\wñ\s]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
-    title_normalized = models.CharField(max_length=200, db_index=True)
-    author_normalized = models.CharField(max_length=200, db_index=True)
+
+class OfferedBook(db.Model):
+    __tablename__ = "offered_book"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    title = db.Column(db.String(200), nullable=False)
+    author = db.Column(db.String(200), nullable=False)
+    title_normalized = db.Column(db.String(200), index=True, default="")
+    author_normalized = db.Column(db.String(200), index=True, default="")
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    notes = db.Column(db.Text, default="")
+    status = db.Column(db.String(20), default=BookStatus.NEW, nullable=False)
+    status_changed_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    cover_image = db.Column(db.String(500), nullable=True)
+    cover_uploaded_at = db.Column(db.DateTime, nullable=True)
+    likes = db.Column(db.Integer, default=0, nullable=False)
+
+    user = db.relationship("User", back_populates="offered", foreign_keys=[user_id])
+    book_likes = db.relationship("Like", back_populates="offered_book", cascade="all, delete-orphan")
+    requests = db.relationship("ExchangeRequest", back_populates="offered_book", foreign_keys="ExchangeRequest.offered_book_id")
 
     @staticmethod
     def normalize_spanish(text):
-        """Normalize text for search"""
-        text = text.lower()
-        replacements = {"á": "a", "é": "e", "í": "i", "ó": "o", "ú": "u", "ü": "u"}
-        for old, new in replacements.items():
-            text = text.replace(old, new)
-        text = text.replace("100", "cien")
-        text = re.sub(r"[^\wñ\s]", "", text)
-        text = re.sub(r"\s+", " ", text).strip()
-        return text
+        return _normalize_spanish(text)
 
-    def save(self, *args, **kwargs):
-        # This runs for ALL child models
-        self.title_normalized = self.normalize_spanish(self.title) if self.title else ""
-        self.author_normalized = self.normalize_spanish(self.author)
-        super().save(*args, **kwargs)
+    def _set_normalized(self):
+        self.title_normalized = _normalize_spanish(self.title) if self.title else ""
+        self.author_normalized = _normalize_spanish(self.author) if self.author else ""
 
-    class Meta:
-        abstract = True
-
-    def __str__(self):
-        return f"{self.__class__}({self.title}, {self.author})"
-
-
-class OfferedBookManager(models.Manager):
-    def available(self):
-        """Return only books that are available (exclude deleted and traded)."""
-        return self.exclude(status__in=[BookStatus.DELETED, BookStatus.TRADED])
-
-    def traded_by(self, user):
-        """Return traded books for a user, ordered by most recent first."""
-        return self.filter(user=user, status=BookStatus.TRADED).order_by(
-            "-status_changed_at"
-        )
-
-    def _annotate_last_activity(self, queryset):
-        """Add last_activity_date annotation (max of created_at and cover_uploaded_at)."""
-        return queryset.annotate(
-            last_activity_date=Greatest(
-                "created_at", Coalesce("cover_uploaded_at", "created_at")
-            )
-        )
-
-    def for_user(
-        self, user, search=None, wanted=False, photo=False, my_locations=False
-    ):
-        """
-        Return books available to the user with all filters applied.
-
-        For authenticated users: optionally filter by user's locations and annotate already_requested.
-        For anonymous users: return all books with no location filtering.
-
-        Args:
-            user: User object (authenticated or anonymous)
-            search: Search query string (optional)
-            wanted: Filter to user's wanted books (boolean)
-            photo: Filter to books with uploaded photos (boolean)
-            my_locations: Filter by user's locations vs all locations (boolean)
-        """
-        if user.is_authenticated and my_locations:
-            user_areas = user.locations.values_list("area", flat=True)
-            queryset = (
-                self.available().filter(user__locations__area__in=user_areas).distinct()
-            )
-        else:
-            queryset = self.available()
-
-        queryset = queryset.select_related("user", "user__profile")
-
-        # Apply filters in order
-        if search:
-            queryset = self._search(queryset, search)
-        if wanted and user.is_authenticated:
-            queryset = self._filter_by_wanted(queryset, user)
-        if photo:
-            queryset = queryset.filter(cover_image__isnull=False).exclude(
-                cover_image=""
-            )
-
-        queryset = self._annotate_last_activity(queryset)
-        queryset = queryset.order_by("-last_activity_date")
-
-        if user.is_authenticated:
-            queryset = self._annotate_already_requested(queryset, user)
-            return self._annotate_already_liked(queryset, user)
-        else:
-            return queryset.annotate(
-                already_requested=Value(False, output_field=BooleanField()),
-                already_liked=Value(False, output_field=BooleanField()),
-            )
-
-    def for_profile(self, profile_user, viewing_user):
-        """
-        Return books for a profile page.
-
-        - If viewing own profile: returns all books without annotation
-        - If viewing another user's profile: annotates with 'already_requested' flag
-        """
-        queryset = (
-            self.available()
-            .filter(user=profile_user)
-            .select_related("user", "user__profile")
-            .order_by("-created_at")
-        )
-
-        if viewing_user != profile_user:
-            queryset = self._annotate_already_requested(queryset, viewing_user)
-            queryset = self._annotate_already_liked(queryset, viewing_user)
-
-        return queryset
-
-    def _search(self, queryset, search_query):
-        """
-        Filter books by search query against normalized title and author fields.
-
-        The search query is normalized using the same logic as book titles/authors,
-        then split into words. Books match if all words appear in either the title
-        or author (case-insensitive, accent-insensitive).
-        """
-        if not search_query:
-            return queryset
-
-        # Normalize the search query using the same method as books
-        normalized_query = self.model.normalize_spanish(search_query)
-
-        # Split into individual words
-        search_words = normalized_query.split()
-
-        # Filter: all words must appear in title or author
-        for word in search_words:
-            queryset = queryset.filter(
-                Q(title_normalized__icontains=word)
-                | Q(author_normalized__icontains=word)
-            )
-
-        return queryset
-
-    def _filter_by_wanted(self, queryset, user):
-        """
-        Filter offered books that match the user's wanted books.
-
-        A book matches if:
-        - When wanted book has a title: both title and author match (case/accent-insensitive)
-        - When wanted book has no title: author matches only (for any book by that author)
-        Results are aggregated across all wanted books and deduplicated.
-        """
-        wanted_books = user.wanted.all()
-
-        if not wanted_books.exists():
-            return queryset.none()
-
-        match_conditions = Q()
-
-        for wanted in wanted_books:
-            if wanted.title:
-                # Specific book: match both title and author
-                match_conditions |= Q(
-                    title_normalized__icontains=wanted.title_normalized
-                ) & Q(author_normalized__icontains=wanted.author_normalized)
-            else:
-                # Author-only: match any book by this author
-                match_conditions |= Q(
-                    author_normalized__icontains=wanted.author_normalized
-                )
-
-        return queryset.filter(match_conditions).exclude(user=user).distinct()
-
-    def _annotate_already_liked(self, queryset, user):
-        return queryset.annotate(
-            already_liked=Exists(
-                Like.objects.filter(user=user, offered_book=OuterRef("pk"))
-            )
-        )
-
-    def _annotate_already_requested(self, queryset, requesting_user):
-        """
-        Helper to add already_requested annotation to a queryset.
-
-        Checks if the user has a recent exchange request (within EXCHANGE_REQUEST_EXPIRY_DAYS)
-        for each book. After the expiry period, requests can be retried.
-        """
-        expiry_days = getattr(settings, "EXCHANGE_REQUEST_EXPIRY_DAYS", 15)
-        cutoff_date = timezone.now() - timedelta(days=expiry_days)
-
-        return queryset.annotate(
-            already_requested=Exists(
-                ExchangeRequest.objects.filter(
-                    from_user=requesting_user,
-                    offered_book=OuterRef("pk"),
-                    created_at__gte=cutoff_date,
-                )
-            )
-        )
-
-
-class OfferedBook(BaseBook):
-    """A book a user offers for exchanging."""
-
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="offered")
-    notes = models.TextField(blank=True, max_length=300)
-    reserved = models.BooleanField(
-        default=False,
-        help_text="Used to mark that this book is reserved for a not yet fulfilled exchange.",
-    )
-    status = models.CharField(
-        max_length=20,
-        choices=BookStatus.choices,
-        default=BookStatus.NEW,
-        help_text="Current status of the book offer",
-    )
-    status_changed_at = models.DateTimeField(
-        default=timezone.now,
-        help_text="When the status was last changed",
-    )
-    cover_image = models.ImageField(
-        upload_to="book_covers/%Y/%m/",
-        blank=True,
-        null=True,
-        help_text="User-uploaded photo of the physical book",
-    )
-    cover_uploaded_at = models.DateTimeField(
-        null=True,
-        blank=True,
-        help_text="When the cover photo was last uploaded",
-    )
-    likes = models.PositiveIntegerField(default=0)
-
-    objects = OfferedBookManager()
-
-    def delete(self, *args, **kwargs):
-        """Soft delete: mark book as deleted and remove cover image."""
+    @property
+    def cover_image_url(self):
         if self.cover_image:
-            self.cover_image.delete(save=False)
+            return f"/media/{self.cover_image}"
+        return None
+
+    @property
+    def last_activity_date(self):
+        if self.cover_uploaded_at:
+            return max(self.created_at, self.cover_uploaded_at)
+        return self.created_at
+
+    @property
+    def is_reserved(self):
+        return self.status == BookStatus.RESERVED
+
+    @property
+    def notes_display(self):
+        if self.is_reserved:
+            return f"[RESERVADO]\n{self.notes}" if self.notes else "[RESERVADO]"
+        return self.notes
+
+    def delete(self):
+        """Soft delete: mark as deleted and remove cover image from disk."""
+        self._remove_cover_file()
+        self.cover_image = None
         self.status = BookStatus.DELETED
-        self.status_changed_at = timezone.now()
-        self.save()
+        self.status_changed_at = datetime.now(timezone.utc)
+        db.session.add(self)
+        db.session.commit()
 
     def trade(self):
-        """Mark book as traded and remove cover image."""
-        if self.cover_image:
-            self.cover_image.delete(save=False)
+        """Mark as traded and remove cover image from disk."""
+        self._remove_cover_file()
+        self.cover_image = None
         self.status = BookStatus.TRADED
-        self.status_changed_at = timezone.now()
-        self.save()
+        self.status_changed_at = datetime.now(timezone.utc)
+        db.session.add(self)
+        db.session.commit()
 
     def reserve(self):
         """Toggle book reservation status between NEW and RESERVED."""
@@ -342,99 +191,252 @@ class OfferedBook(BaseBook):
             self.status = BookStatus.NEW
         else:
             self.status = BookStatus.RESERVED
-        self.status_changed_at = timezone.now()
-        self.save()
-
-    def is_reserved(self):
-        """Check if the book is reserved."""
-        return self.status == BookStatus.RESERVED
+        self.status_changed_at = datetime.now(timezone.utc)
+        db.session.add(self)
+        db.session.commit()
 
     def add_like(self, user):
-        """Create a like from user, incrementing the counter. Silently ignores duplicate likes."""
-        _, created = Like.objects.get_or_create(user=user, offered_book=self)
-        if created:
-            OfferedBook.objects.filter(pk=self.pk).update(likes=F("likes") + 1)
+        """Create a like from user, incrementing the counter. Silently ignores duplicates."""
+        existing = db.session.execute(
+            db.select(Like).where(Like.user_id == user.id, Like.offered_book_id == self.id)
+        ).scalar_one_or_none()
+        if existing is None:
+            db.session.add(Like(user_id=user.id, offered_book_id=self.id))
+            db.session.execute(
+                db.update(OfferedBook).where(OfferedBook.id == self.id).values(likes=OfferedBook.likes + 1)
+            )
 
     def toggle_like(self, user):
         """Toggle like from user. Returns True if now liked, False if unliked."""
-        like, created = Like.objects.get_or_create(user=user, offered_book=self)
-        if created:
-            OfferedBook.objects.filter(pk=self.pk).update(likes=F("likes") + 1)
+        existing = db.session.execute(
+            db.select(Like).where(Like.user_id == user.id, Like.offered_book_id == self.id)
+        ).scalar_one_or_none()
+        if existing is None:
+            db.session.add(Like(user_id=user.id, offered_book_id=self.id))
+            db.session.execute(
+                db.update(OfferedBook).where(OfferedBook.id == self.id).values(likes=OfferedBook.likes + 1)
+            )
+            db.session.commit()
             return True
         else:
-            like.delete()
-            OfferedBook.objects.filter(pk=self.pk, likes__gt=0).update(likes=F("likes") - 1)
+            db.session.delete(existing)
+            db.session.execute(
+                db.update(OfferedBook).where(OfferedBook.id == self.id, OfferedBook.likes > 0).values(likes=OfferedBook.likes - 1)
+            )
+            db.session.commit()
             return False
 
-    def notes_display(self):
-        """Return notes with [RESERVADO] prefix if book is reserved."""
-        if self.is_reserved():
-            if self.notes:
-                return f"[RESERVADO]\n{self.notes}"
+    def _remove_cover_file(self):
+        if self.cover_image:
+            try:
+                media_folder = current_app.config.get("MEDIA_FOLDER", "media")
+                file_path = os.path.normpath(os.path.join(media_folder, self.cover_image))
+                if file_path.startswith(media_folder) and os.path.exists(file_path):
+                    os.remove(file_path)
+            except Exception:
+                pass
+
+    def __str__(self):
+        return f"OfferedBook({self.title}, {self.author})"
+
+
+class WantedBook(db.Model):
+    __tablename__ = "wanted_book"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    title = db.Column(db.String(200), default="")
+    author = db.Column(db.String(200), nullable=False)
+    title_normalized = db.Column(db.String(200), index=True, default="")
+    author_normalized = db.Column(db.String(200), index=True, default="")
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    user = db.relationship("User", back_populates="wanted")
+
+    @staticmethod
+    def normalize_spanish(text):
+        return _normalize_spanish(text)
+
+    def _set_normalized(self):
+        self.title_normalized = _normalize_spanish(self.title) if self.title else ""
+        self.author_normalized = _normalize_spanish(self.author) if self.author else ""
+
+    def __str__(self):
+        return f"WantedBook({self.title}, {self.author})"
+
+
+class Like(db.Model):
+    __tablename__ = "like"
+    __table_args__ = (db.UniqueConstraint("user_id", "offered_book_id", name="unique_user_book_like"),)
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    offered_book_id = db.Column(db.Integer, db.ForeignKey("offered_book.id"), nullable=False)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    user = db.relationship("User", back_populates="likes")
+    offered_book = db.relationship("OfferedBook", back_populates="book_likes")
+
+
+class ExchangeRequest(db.Model):
+    __tablename__ = "exchange_request"
+
+    id = db.Column(db.Integer, primary_key=True)
+    from_user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    to_user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
+    offered_book_id = db.Column(db.Integer, db.ForeignKey("offered_book.id"), nullable=True)
+    book_title = db.Column(db.String(200), nullable=False)
+    book_author = db.Column(db.String(200), nullable=False)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    from_user = db.relationship("User", back_populates="sent_requests", foreign_keys=[from_user_id])
+    to_user = db.relationship("User", back_populates="received_requests", foreign_keys=[to_user_id])
+    offered_book = db.relationship("OfferedBook", back_populates="requests", foreign_keys=[offered_book_id])
+
+
+# ---------------------------------------------------------------------------
+# Query helpers
+# ---------------------------------------------------------------------------
+
+def get_available_books():
+    """Return a select statement for books that are not deleted or traded."""
+    return db.select(OfferedBook).where(
+        OfferedBook.status.notin_([BookStatus.DELETED, BookStatus.TRADED])
+    )
+
+
+def get_traded_by(user):
+    """Return traded books for a user, ordered by most recent first."""
+    return db.session.execute(
+        db.select(OfferedBook)
+        .where(OfferedBook.user_id == user.id, OfferedBook.status == BookStatus.TRADED)
+        .order_by(OfferedBook.status_changed_at.desc())
+    ).scalars().all()
+
+
+def get_books_for_user(user, search=None, wanted=False, photo=False, my_locations=False):
+    """Return books available to the user with all filters applied."""
+    stmt = get_available_books().join(User, OfferedBook.user_id == User.id)
+
+    if getattr(user, "is_authenticated", False) and my_locations:
+        user_areas = [loc.area for loc in user.locations]
+        stmt = (
+            stmt.join(UserLocation, User.id == UserLocation.user_id)
+            .where(UserLocation.area.in_(user_areas))
+            .distinct()
+        )
+
+    if search:
+        normalized = _normalize_spanish(search)
+        for word in normalized.split():
+            stmt = stmt.where(
+                db.or_(
+                    OfferedBook.title_normalized.ilike(f"%{word}%"),
+                    OfferedBook.author_normalized.ilike(f"%{word}%"),
+                )
+            )
+
+    if wanted and getattr(user, "is_authenticated", False):
+        wanted_books = db.session.execute(
+            db.select(WantedBook).where(WantedBook.user_id == user.id)
+        ).scalars().all()
+
+        if not wanted_books:
+            return []
+
+        conditions = []
+        for wb in wanted_books:
+            if wb.title_normalized:
+                conditions.append(db.and_(
+                    OfferedBook.title_normalized.ilike(f"%{wb.title_normalized}%"),
+                    OfferedBook.author_normalized.ilike(f"%{wb.author_normalized}%"),
+                ))
             else:
-                return "[RESERVADO]"
-        return self.notes
+                conditions.append(OfferedBook.author_normalized.ilike(f"%{wb.author_normalized}%"))
 
+        stmt = stmt.where(db.or_(*conditions)).where(OfferedBook.user_id != user.id).distinct()
 
-class WantedBook(BaseBook):
-    "A book a user is interested in."
+    if photo:
+        stmt = stmt.where(OfferedBook.cover_image.isnot(None), OfferedBook.cover_image != "")
 
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="wanted")
-    title = models.CharField(max_length=200, blank=True)
-
-
-class Like(models.Model):
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="likes")
-    offered_book = models.ForeignKey(
-        OfferedBook, on_delete=models.CASCADE, related_name="book_likes"
+    last_activity = db.func.max(
+        OfferedBook.created_at,
+        db.func.coalesce(OfferedBook.cover_uploaded_at, OfferedBook.created_at),
     )
-    created_at = models.DateTimeField(auto_now_add=True)
+    stmt = stmt.order_by(last_activity.desc())
 
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=["user", "offered_book"], name="unique_user_book_like")
-        ]
+    books = db.session.execute(stmt).scalars().all()
+    _annotate_books(books, user)
+    return books
 
 
-class ExchangeRequestManager(models.Manager):
-    def recent_sent_by(self, user, limit=10):
-        """
-        Return recent exchange requests sent by a user.
-        Ordered by most recent first, limited to specified count.
-        """
-        return (
-            self.filter(from_user=user)
-            .select_related("to_user")
-            .order_by("-created_at")[:limit]
+def get_books_for_profile(profile_user, viewing_user):
+    """Return books for a profile page."""
+    stmt = (
+        get_available_books()
+        .where(OfferedBook.user_id == profile_user.id)
+        .order_by(OfferedBook.created_at.desc())
+    )
+    books = db.session.execute(stmt).scalars().all()
+    viewing_id = getattr(viewing_user, "id", None)
+    if viewing_id != profile_user.id:
+        _annotate_books(books, viewing_user)
+    return books
+
+
+def get_recent_sent_requests(user, limit=10):
+    """Return recent exchange requests sent by a user, most recent first."""
+    return db.session.execute(
+        db.select(ExchangeRequest)
+        .where(ExchangeRequest.from_user_id == user.id)
+        .order_by(ExchangeRequest.created_at.desc())
+        .limit(limit)
+    ).scalars().all()
+
+
+def get_recent_received_requests(user, limit=10):
+    """Return recent exchange requests received by a user, most recent first."""
+    return db.session.execute(
+        db.select(ExchangeRequest)
+        .where(ExchangeRequest.to_user_id == user.id)
+        .order_by(ExchangeRequest.created_at.desc())
+        .limit(limit)
+    ).scalars().all()
+
+
+def _annotate_books(books, user):
+    """Attach already_requested and already_liked as Python attributes on each book."""
+    if not books:
+        return
+
+    if getattr(user, "is_authenticated", False):
+        expiry_days = current_app.config.get("EXCHANGE_REQUEST_EXPIRY_DAYS", 15)
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=expiry_days)
+        book_ids = [b.id for b in books]
+
+        requested_ids = set(
+            db.session.execute(
+                db.select(ExchangeRequest.offered_book_id).where(
+                    ExchangeRequest.from_user_id == user.id,
+                    ExchangeRequest.offered_book_id.in_(book_ids),
+                    ExchangeRequest.created_at >= cutoff_date,
+                )
+            ).scalars().all()
         )
 
-    def recent_received_by(self, user, limit=10):
-        """
-        Return recent exchange requests received by a user.
-        Ordered by most recent first, limited to specified count.
-        """
-        return (
-            self.filter(to_user=user)
-            .select_related("from_user")
-            .order_by("-created_at")[:limit]
+        liked_ids = set(
+            db.session.execute(
+                db.select(Like.offered_book_id).where(
+                    Like.user_id == user.id,
+                    Like.offered_book_id.in_(book_ids),
+                )
+            ).scalars().all()
         )
 
-
-class ExchangeRequest(models.Model):
-    from_user = models.ForeignKey(
-        User, on_delete=models.CASCADE, related_name="sent_requests"
-    )
-    to_user = models.ForeignKey(
-        User, on_delete=models.SET_NULL, related_name="received_requests", null=True
-    )
-    # Reference to the actual book, set to null if book is deleted
-    offered_book = models.ForeignKey(
-        OfferedBook, on_delete=models.SET_NULL, null=True, related_name="requests"
-    )
-    # Denormalized fields to preserve request details when book is deleted or edited
-    book_title = models.CharField(max_length=200)
-    book_author = models.CharField(max_length=200)
-
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    objects = ExchangeRequestManager()
+        for book in books:
+            book.already_requested = book.id in requested_ids
+            book.already_liked = book.id in liked_ids
+    else:
+        for book in books:
+            book.already_requested = False
+            book.already_liked = False

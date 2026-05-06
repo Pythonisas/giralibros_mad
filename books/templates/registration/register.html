@@ -1,4 +1,4 @@
-{% extends "base.html" %} {% load honeypot %} {% load static %} {% block extra_css %}
+{% extends "base.html" %}   {% block extra_css %}
 <style>
   html,
   body {
@@ -16,7 +16,7 @@
     padding-bottom: 4rem;
   }
 </style>
-<script src="{% static 'js/form-validation.js' %}"></script>
+<script src="{{ url_for('static', filename='js/form-validation.js') }}"></script>
 {% endblock %} {% block content %}
 <section class="section">
   <div class="container">
@@ -37,15 +37,11 @@
     </div>
     <div class="columns is-centered">
       <div class="column is-5-tablet is-4-desktop is-3-widescreen">
-        {% if form.non_field_errors %}
-        <div class="notification is-danger is-light">
-          {{ form.non_field_errors }}
-        </div>
-        {% endif %}
+        {% with messages = get_flashed_messages(with_categories=true) %}{% for category, message in messages %}<div class="notification is-{{ category }} is-light">{{ message }}</div>{% endfor %}{% endwith %}
 
-        <form method="post" action="{% url 'register' %}">
-          {% csrf_token %}
-          {% render_honeypot_field %}
+        <form method="post" action="{{ url_for('views.register') }}">
+          {{ form.hidden_tag() if form is defined else '' }}
+          <input type="hidden" name="website" value="">
           {% for field in form %}
           <div class="field">
             <label class="label">{{ field.label }}</label>
@@ -73,7 +69,7 @@
 
         <div class="has-text-centered">
           <p class="is-size-6 has-text-grey">
-            ¿Ya estás registrado? <a href="{% url 'login' %}">Iniciá sesión</a>
+            ¿Ya estás registrado? <a href="{{ url_for('views.login') }}">Iniciá sesión</a>
           </p>
         </div>
       </div>

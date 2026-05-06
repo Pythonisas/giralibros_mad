@@ -1,5 +1,5 @@
 {% extends "base_logged.html" %}
-{% load static %}
+
 
 {% block extra_css %}{% endblock %}
 
@@ -14,19 +14,19 @@
     {# Add Form #}
     <div class="box box-mobile-flat">
       <form method="post" id="book-form">
-        {% csrf_token %}
+        {{ form.hidden_tag() if form is defined else '' }}
 
         <div class="field">
           {{ form.author }}
           {% if form.author.errors %}
-            <p class="help is-danger">{{ form.author.errors.0 }}</p>
+            <p class="help is-danger">{{ form.author.errors[0] }}</p>
           {% endif %}
         </div>
 
         <div class="field">
           {{ form.title }}
           {% if form.title.errors %}
-            <p class="help is-danger">{{ form.title.errors.0 }}</p>
+            <p class="help is-danger">{{ form.title.errors[0] }}</p>
           {% endif %}
         </div>
 
@@ -56,7 +56,7 @@
                     {% endif %}
                   </td>
                   <td class="has-text-right">
-                    <button type="button" class="button is-small is-danger is-light js-delete-book-btn" data-delete-url="{% url 'delete_wanted_book' book.id %}" title="Borrar">
+                    <button type="button" class="button is-small is-danger is-light js-delete-book-btn" data-delete-url="{{ url_for('views.delete_wanted_book', book_id=book.id) }}" title="Borrar">
                       <span class="icon is-small">
                         <i class="fas fa-trash"></i>
                       </span>
@@ -71,7 +71,7 @@
     {% endif %}
 
     <div class="mt-4 has-text-right">
-      <a href="{% url 'profile' username=request.user.username %}" class="button">
+      <a href="{{ url_for('views.profile', username=current_user.username) }}" class="button">
         Volver
       </a>
     </div>

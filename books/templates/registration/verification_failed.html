@@ -12,7 +12,7 @@
         </p>
     </div>
     <hr class="my-5">
-    <a href="{% url 'login' %}" class="button is-light is-fullwidth">
+    <a href="{{ url_for('views.login') }}" class="button is-light is-fullwidth">
         Volver al inicio
     </a>
 {% endblock %}
