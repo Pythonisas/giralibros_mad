@@ -1,162 +1,100 @@
-from django import forms
-from django.contrib.auth.forms import (
-    AuthenticationForm,
-    PasswordResetForm,
-    SetPasswordForm,
-    UserCreationForm,
+from flask_wtf import FlaskForm
+from flask_wtf.file import FileField, FileAllowed
+from wtforms import (
+    BooleanField,
+    EmailField,
+    MultipleFileField,
+    PasswordField,
+    SelectMultipleField,
+    StringField,
+    TextAreaField,
+    HiddenField,
+    widgets,
 )
-from django.contrib.auth.models import User
-
-from books.models import LocationArea, OfferedBook, WantedBook
-
-
-class BulmaFormMixin:
-    """
-    Mixin that automatically applies Bulma CSS classes to form widgets.
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        for field in self.fields.values():
-            widget_class = field.widget.__class__.__name__
-
-            # Determine the appropriate Bulma class
-            if widget_class in [
-                "TextInput",
-                "EmailInput",
-                "PasswordInput",
-                "NumberInput",
-                "URLInput",
-            ]:
-                css_class = "input"
-            elif widget_class == "Textarea":
-                css_class = "textarea"
-            elif widget_class in ["Select", "SelectMultiple"]:
-                css_class = "select"
-            else:
-                continue
-
-            # Add the class to existing attrs
-            existing_class = field.widget.attrs.get("class", "")
-            if css_class not in existing_class:
-                field.widget.attrs["class"] = f"{existing_class} {css_class}".strip()
+from wtforms.validators import (
+    DataRequired,
+    Email,
+    EqualTo,
+    Length,
+    Optional,
+    ValidationError,
+)
 
 
-class EmailOrUsernameAuthenticationForm(BulmaFormMixin, AuthenticationForm):
-    """
-    Custom authentication form that accepts email or username.
-    Uses Django's localization for labels and error messages.
-    """
+AREA_CHOICES = [
+    ("CABA_CENTRO", "CABA Centro"),
+    ("CABA_SUR", "CABA Sur"),
+    ("CABA_NORTE", "CABA Norte"),
+    ("GBA_NORTE", "GBA Norte"),
+    ("GBA_OESTE", "GBA Oeste"),
+    ("GBA_SUR", "GBA Sur"),
+]
 
-    username = forms.CharField(label="Usuario o email")
+
+class MultiCheckboxField(SelectMultipleField):
+    widget = widgets.ListWidget(prefix_label=False)
+    option_widget = widgets.CheckboxInput()
 
 
-class RegistrationForm(BulmaFormMixin, UserCreationForm):
-    """
-    Registration form with username, email, and double password fields.
-    Uses Django's UserCreationForm for password validation and matching.
-    """
-
-    email = forms.EmailField(required=True)
-    password1 = forms.CharField(label="Contraseña", widget=forms.PasswordInput())
-    password2 = forms.CharField(
-        label="Confirmar contraseña", widget=forms.PasswordInput()
+class RegistrationForm(FlaskForm):
+    username = StringField("Nombre de usuario", validators=[DataRequired(), Length(min=3, max=150)])
+    email = EmailField("Email", validators=[DataRequired(), Email()])
+    password = PasswordField("Contraseña", validators=[DataRequired(), Length(min=8)])
+    confirm_password = PasswordField(
+        "Confirmar contraseña",
+        validators=[DataRequired(), EqualTo("password", message="Las contraseñas no coinciden")],
     )
+    website = HiddenField()
 
-    class Meta:
-        model = User
-        fields = ["username", "email", "password1", "password2"]
-
-    def clean_username(self):
-        username = self.cleaned_data.get("username")
-        if User.objects.filter(username=username).exists():
-            raise forms.ValidationError("Este usuario ya está registrado")
-        return username
-
-    def clean_email(self):
-        email = self.cleaned_data.get("email")
-        if User.objects.filter(email=email).exists():
-            raise forms.ValidationError("Este email ya está registrado")
-        return email
+    def validate_website(self, field):
+        if field.data:
+            raise ValidationError("Bot detectado.")
 
 
-class PasswordResetRequestForm(BulmaFormMixin, PasswordResetForm):
-    """
-    PasswordResetForm with Bulma CSS styling.
-    """
-
-    pass
+class LoginForm(FlaskForm):
+    email = StringField("Email o usuario", validators=[DataRequired()])
+    password = PasswordField("Contraseña", validators=[DataRequired()])
+    remember_me = BooleanField("Recordarme")
 
 
-class CustomSetPasswordForm(BulmaFormMixin, SetPasswordForm):
-    """
-    SetPasswordForm with Bulma CSS styling.
-    """
-
-    pass
-
-
-class ProfileForm(BulmaFormMixin, forms.Form):
-    """
-    Form for creating/editing user profile.
-    Handles User.first_name, UserProfile fields, and UserLocation selections.
-    """
-
-    first_name = forms.CharField(max_length=150)
-    email = forms.EmailField()
-    alternate_contact = forms.CharField(
-        required=False,
-        max_length=200,
-        widget=forms.TextInput(attrs={"placeholder": "@usuario, teléfono, etc."}),
+class ProfileEditForm(FlaskForm):
+    contact_email = EmailField("Email de contacto", validators=[Optional(), Email()])
+    alternate_contact = StringField("Contacto alternativo", validators=[Optional(), Length(max=200)])
+    about = TextAreaField("Sobre mí", validators=[Optional()])
+    locations = MultiCheckboxField("Zonas", choices=AREA_CHOICES, validators=[Optional()])
+    profile_picture = FileField(
+        "Foto de perfil",
+        validators=[FileAllowed(["jpg", "jpeg", "png", "webp"], "Solo imágenes")],
     )
-    locations = forms.MultipleChoiceField(
-        choices=LocationArea.choices,
-        widget=forms.CheckboxSelectMultiple,
-        required=True,
-    )
-    about = forms.CharField(
-        required=False,
-        max_length=200,
-        widget=forms.Textarea(
-            attrs={
-                "rows": 4,
-                "placeholder": "Lo que quieras que se vea en tu perfil público.",
-                "maxlength": 200,
-            }
-        ),
+    website = HiddenField()
+
+    def validate_website(self, field):
+        if field.data:
+            raise ValidationError("Bot detectado.")
+
+
+class OfferedBookForm(FlaskForm):
+    title = StringField("Título", validators=[DataRequired(), Length(max=200)])
+    author = StringField("Autor", validators=[DataRequired(), Length(max=200)])
+    notes = TextAreaField("Notas", validators=[Optional()])
+    cover_image = FileField(
+        "Imagen de portada",
+        validators=[FileAllowed(["jpg", "jpeg", "png", "webp"], "Solo imágenes")],
     )
 
 
-class OfferedBookForm(BulmaFormMixin, forms.ModelForm):
-    """
-    Form for creating/editing an offered book.
-    """
-
-    class Meta:
-        model = OfferedBook
-        fields = ["title", "author", "notes", "cover_image"]
-        widgets = {
-            "title": forms.TextInput(attrs={"placeholder": "Título del libro", "autofocus": True}),
-            "author": forms.TextInput(attrs={"placeholder": "Autor"}),
-            "notes": forms.Textarea(
-                attrs={
-                    "rows": 2,
-                    "placeholder": "Observaciones (opcional)",
-                    "maxlength": 300,
-                }
-            ),
-        }
+class WantedBookForm(FlaskForm):
+    title = StringField("Título", validators=[Optional(), Length(max=200)])
+    author = StringField("Autor", validators=[DataRequired(), Length(max=200)])
 
 
-class WantedBookForm(BulmaFormMixin, forms.ModelForm):
-    """
-    Form for creating/editing a wanted book.
-    """
+class PasswordResetRequestForm(FlaskForm):
+    email = EmailField("Email", validators=[DataRequired(), Email()])
 
-    class Meta:
-        model = WantedBook
-        fields = ["author", "title"]
-        widgets = {
-            "author": forms.TextInput(attrs={"placeholder": "Autor", "autofocus": True}),
-            "title": forms.TextInput(attrs={"placeholder": "Título (opcional)"}),
-        }
+
+class PasswordResetForm(FlaskForm):
+    password = PasswordField("Nueva contraseña", validators=[DataRequired(), Length(min=8)])
+    confirm_password = PasswordField(
+        "Confirmar contraseña",
+        validators=[DataRequired(), EqualTo("password", message="Las contraseñas no coinciden")],
+    )

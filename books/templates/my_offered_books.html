@@ -1,5 +1,5 @@
 {% extends "base_logged.html" %}
-{% load static %}
+
 
 {% block extra_css %}
 <style>
@@ -94,7 +94,7 @@
     {# Add/Edit Form #}
     <div class="box box-mobile-flat">
       <form method="post" enctype="multipart/form-data" id="book-form">
-        {% csrf_token %}
+        {{ form.hidden_tag() if form is defined else '' }}
 
         <div class="columns">
           {# Left column: Form fields #}
@@ -102,21 +102,21 @@
             <div class="field">
               {{ form.title }}
               {% if form.title.errors %}
-                <p class="help is-danger">{{ form.title.errors.0 }}</p>
+                <p class="help is-danger">{{ form.title.errors[0] }}</p>
               {% endif %}
             </div>
 
             <div class="field">
               {{ form.author }}
               {% if form.author.errors %}
-                <p class="help is-danger">{{ form.author.errors.0 }}</p>
+                <p class="help is-danger">{{ form.author.errors[0] }}</p>
               {% endif %}
             </div>
 
             <div class="field">
               {{ form.notes }}
               {% if form.notes.errors %}
-                <p class="help is-danger">{{ form.notes.errors.0 }}</p>
+                <p class="help is-danger">{{ form.notes.errors[0] }}</p>
               {% endif %}
             </div>
           </div>
@@ -125,11 +125,11 @@
           <div class="column is-narrow">
             <input type="file" name="cover_image" id="js-cover-image-input" accept="image/*" style="display: none;">
             {% if form.cover_image.errors %}
-              <p class="help is-danger">{{ form.cover_image.errors.0 }}</p>
+              <p class="help is-danger">{{ form.cover_image.errors[0] }}</p>
             {% endif %}
             <div id="photo-preview-container" class="is-flex is-align-items-center book-cover-container">
-              {% if form.instance.cover_image %}
-                <img src="{{ form.instance.cover_image.url }}" alt="Cover" class="book-cover-image" id="photo-preview">
+              {% if editing_book and editing_book.cover_image %}
+                <img src="{{ editing_book.cover_image_url }}" alt="Cover" class="book-cover-image" id="photo-preview">
               {% else %}
                 <div class="book-placeholder book-cover-container is-flex is-justify-content-center is-align-items-center">
                   <span class="icon is-medium has-text-grey">
@@ -149,31 +149,31 @@
                 <span class="icon is-small">
                   <i class="fas fa-camera"></i>
                 </span>
-                <span>{% if form.instance.cover_image %}Cambiar foto{% else %}Agregar foto{% endif %}</span>
+                <span>{% if editing_book and editing_book.cover_image %}Cambiar foto{% else %}Agregar foto{% endif %}</span>
               </button>
-            {% if editing_book_id %}
-              <button type="button" class="button is-small is-danger is-light js-delete-book-btn" data-delete-url="{% url 'delete_offered_book' editing_book_id %}">
+            {% if editing_book %}
+              <button type="button" class="button is-small is-danger is-light js-delete-book-btn" data-delete-url="{{ url_for('views.delete_offered_book', book_id=editing_book.id) }}">
                 <span class="icon is-small">
                   <i class="fas fa-trash"></i>
                 </span>
                 <span>Borrar</span>
               </button>
-              {% if form.instance.is_reserved %}
-              <button type="button" class="button is-small is-light js-reserve-book-btn" data-reserve-url="{% url 'reserve_offered_book' editing_book_id %}">
+              {% if editing_book and editing_book.is_reserved %}
+              <button type="button" class="button is-small is-light js-reserve-book-btn" data-reserve-url="{{ url_for('views.reserve_offered_book', book_id=editing_book.id) }}">
                 <span class="icon is-small">
                   <i class="fa fa-play"></i>
                 </span>
                 <span>Desreservar</span>
               </button>
               {% else %}
-              <button type="button" class="button is-small is-light js-reserve-book-btn" data-reserve-url="{% url 'reserve_offered_book' editing_book_id %}">
+              <button type="button" class="button is-small is-light js-reserve-book-btn" data-reserve-url="{{ url_for('views.reserve_offered_book', book_id=editing_book.id) }}">
                 <span class="icon is-small">
                   <i class="fa fa-pause"></i>
                 </span>
                 <span>Reservar</span>
               </button>
               {% endif %}
-              <button type="button" class="button is-small is-success is-light js-mark-exchanged-btn" data-trade-url="{% url 'trade_offered_book' editing_book_id %}">
+              <button type="button" class="button is-small is-success is-light js-mark-exchanged-btn" data-trade-url="{{ url_for('views.trade_offered_book', book_id=editing_book.id) }}">
                 <span class="icon is-small">
                   <i class="fas fa-check"></i>
                 </span>
@@ -182,7 +182,7 @@
             {% endif %}
             </div>
             <button type="submit" class="button is-primary">
-              {% if editing_book_id %}Guardar cambios{% else %}Agregar libro{% endif %}
+              {% if editing_book %}Guardar cambios{% else %}Agregar libro{% endif %}
             </button>
           </div>
         </div>
@@ -191,8 +191,8 @@
         <div id="mobile-cover-operations" class="mb-4">
           <div class="mobile-cover">
             <div id="photo-preview-container-mobile" class="is-flex is-align-items-center book-cover-container">
-              {% if form.instance.cover_image %}
-                <img src="{{ form.instance.cover_image.url }}" alt="Cover" class="book-cover-image">
+              {% if editing_book and editing_book.cover_image %}
+                <img src="{{ editing_book.cover_image_url }}" alt="Cover" class="book-cover-image">
               {% else %}
                 <div class="book-placeholder book-cover-container is-flex is-justify-content-center is-align-items-center">
                   <span class="icon is-medium has-text-grey">
@@ -207,31 +207,31 @@
               <span class="icon is-small">
                 <i class="fas fa-camera"></i>
               </span>
-              <span>{% if form.instance.cover_image %}Cambiar foto{% else %}Agregar foto{% endif %}</span>
+              <span>{% if editing_book and editing_book.cover_image %}Cambiar foto{% else %}Agregar foto{% endif %}</span>
             </button>
-            {% if editing_book_id %}
-            <button type="button" class="button is-small is-danger is-light js-delete-book-btn" data-delete-url="{% url 'delete_offered_book' editing_book_id %}">
+            {% if editing_book %}
+            <button type="button" class="button is-small is-danger is-light js-delete-book-btn" data-delete-url="{{ url_for('views.delete_offered_book', book_id=editing_book.id) }}">
               <span class="icon is-small">
                 <i class="fas fa-trash"></i>
               </span>
               <span>Borrar</span>
             </button>
-            {% if form.instance.is_reserved %}
-            <button type="button" class="button is-small is-light js-reserve-book-btn" data-reserve-url="{% url 'reserve_offered_book' editing_book_id %}">
+            {% if editing_book and editing_book.is_reserved %}
+            <button type="button" class="button is-small is-light js-reserve-book-btn" data-reserve-url="{{ url_for('views.reserve_offered_book', book_id=editing_book.id) }}">
               <span class="icon is-small">
                 <i class="fa fa-play"></i>
               </span>
               <span>Desreservar</span>
             </button>
             {% else %}
-            <button type="button" class="button is-small is-light js-reserve-book-btn" data-reserve-url="{% url 'reserve_offered_book' editing_book_id %}">
+            <button type="button" class="button is-small is-light js-reserve-book-btn" data-reserve-url="{{ url_for('views.reserve_offered_book', book_id=editing_book.id) }}">
               <span class="icon is-small">
                 <i class="fa fa-pause"></i>
               </span>
               <span>Reservar</span>
             </button>
             {% endif %}
-            <button type="button" class="button is-small is-success is-light js-mark-exchanged-btn" data-trade-url="{% url 'trade_offered_book' editing_book_id %}">
+            <button type="button" class="button is-small is-success is-light js-mark-exchanged-btn" data-trade-url="{{ url_for('views.trade_offered_book', book_id=editing_book.id) }}">
               <span class="icon is-small">
                 <i class="fas fa-check"></i>
               </span>
@@ -243,7 +243,7 @@
         <div class="field is-grouped is-grouped-centered mt-4" id="mobile-submit">
           <div class="control">
             <button type="submit" class="button is-primary">
-              {% if editing_book_id %}Guardar cambios{% else %}Agregar libro{% endif %}
+              {% if editing_book %}Guardar cambios{% else %}Agregar libro{% endif %}
             </button>
           </div>
         </div>
@@ -257,10 +257,10 @@
           <table class="table is-fullwidth books-table">
             <tbody>
               {% for book in offered_books %}
-                <tr id="book-row-{{ book.id }}" data-edit-url="{% url 'edit_offered_book' book.id %}">
+                <tr id="book-row-{{ book.id }}" data-edit-url="{{ url_for('views.my_offered_books', book_id=book.id) }}">
                   <td><strong>{{ book.title }}</strong>, {{ book.author }}</td>
                   <td class="has-text-right">
-                    <a href="{% url 'edit_offered_book' book.id %}" class="button is-white">
+                    <a href="{{ url_for('views.my_offered_books', book_id=book.id) }}" class="button is-white">
                       <span class="icon is-small">
                         <i class="fas fa-edit"></i>
                       </span>
@@ -276,7 +276,7 @@
     {% endif %}
 
     <div class="mt-4 has-text-right">
-      <a href="{% url 'profile' username=request.user.username %}" class="button">
+      <a href="{{ url_for('views.profile', username=current_user.username) }}" class="button">
         Volver
       </a>
     </div>
@@ -373,7 +373,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         if (response.ok) {
-          window.location.href = '{% url "my_offered" %}';
+          window.location.href = '{{ url_for('views.my_offered_books') }}';
         } else {
           alert('Error al borrar el libro.');
         }
@@ -399,7 +399,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         if (response.ok) {
-          window.location.href = '{% url "my_offered" %}';
+          window.location.href = '{{ url_for('views.my_offered_books') }}';
         } else {
           alert('Error al marcar el libro.');
         }

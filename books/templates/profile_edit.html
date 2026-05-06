@@ -4,17 +4,13 @@
 <div class="columns is-centered">
   <div class="column is-8-tablet is-6-desktop">
     <h1 class="title">
-      {% if user.profile %}Tu perfil{% else %}Completá tu perfil{% endif %}
+      {% if current_user.profile %}Tu perfil{% else %}Completá tu perfil{% endif %}
     </h1>
 
     <form method="post" enctype="multipart/form-data">
-      {% csrf_token %}
+      {{ form.hidden_tag() if form is defined else '' }}
 
-      {% if form.non_field_errors %}
-        <div class="notification is-danger is-light">
-          {{ form.non_field_errors }}
-        </div>
-      {% endif %}
+      {% with messages = get_flashed_messages(with_categories=true) %}{% for category, message in messages %}<div class="notification is-{{ category }} is-light">{{ message }}</div>{% endfor %}{% endwith %}
 
       <div class="field">
         <label class="label">Ubicación <span class="has-text-danger">*</span></label>
@@ -25,33 +21,33 @@
         <div class="control">
           <div class="location-grid">
             <label class="tag is-medium is-light location-tag location-tag-checkbox">
-              <input type="checkbox" name="locations" value="CABA_NORTE" {% if 'CABA_NORTE' in form.locations.value|default:'' %}checked{% endif %} />
+              <input type="checkbox" name="locations" value="CABA_NORTE" {% if 'CABA_NORTE' in (form.locations.data or []) %}checked{% endif %} />
               CABA Norte
             </label>
             <label class="tag is-medium is-light location-tag location-tag-checkbox">
-              <input type="checkbox" name="locations" value="CABA_CENTRO" {% if 'CABA_CENTRO' in form.locations.value|default:'' %}checked{% endif %} />
+              <input type="checkbox" name="locations" value="CABA_CENTRO" {% if 'CABA_CENTRO' in (form.locations.data or []) %}checked{% endif %} />
               CABA Centro
             </label>
             <label class="tag is-medium is-light location-tag location-tag-checkbox">
-              <input type="checkbox" name="locations" value="CABA_SUR" {% if 'CABA_SUR' in form.locations.value|default:'' %}checked{% endif %} />
+              <input type="checkbox" name="locations" value="CABA_SUR" {% if 'CABA_SUR' in (form.locations.data or []) %}checked{% endif %} />
               CABA Sur
             </label>
             <label class="tag is-medium is-light location-tag location-tag-checkbox">
-              <input type="checkbox" name="locations" value="GBA_NORTE" {% if 'GBA_NORTE' in form.locations.value|default:'' %}checked{% endif %} />
+              <input type="checkbox" name="locations" value="GBA_NORTE" {% if 'GBA_NORTE' in (form.locations.data or []) %}checked{% endif %} />
               GBA Norte
             </label>
             <label class="tag is-medium is-light location-tag location-tag-checkbox">
-              <input type="checkbox" name="locations" value="GBA_OESTE" {% if 'GBA_OESTE' in form.locations.value|default:'' %}checked{% endif %} />
+              <input type="checkbox" name="locations" value="GBA_OESTE" {% if 'GBA_OESTE' in (form.locations.data or []) %}checked{% endif %} />
               GBA Oeste
             </label>
             <label class="tag is-medium is-light location-tag location-tag-checkbox">
-              <input type="checkbox" name="locations" value="GBA_SUR" {% if 'GBA_SUR' in form.locations.value|default:'' %}checked{% endif %} />
+              <input type="checkbox" name="locations" value="GBA_SUR" {% if 'GBA_SUR' in (form.locations.data or []) %}checked{% endif %} />
               GBA Sur
             </label>
           </div>
         </div>
         {% if form.locations.errors %}
-          <p class="help is-danger">{{ form.locations.errors.0 }}</p>
+          <p class="help is-danger">{{ form.locations.errors[0] }}</p>
         {% endif %}
       </div>
 
@@ -65,11 +61,9 @@
         <div class="field">
           <label class="label">Nombre <span class="has-text-danger">*</span></label>
           <div class="control">
-            <input class="input" type="text" name="first_name" value="{{ form.first_name.value|default:'' }}" placeholder="Tu nombre" required />
+            <input class="input" type="text" name="first_name" value="{{ current_user.first_name }}" placeholder="Tu nombre" required />
           </div>
-          {% if form.first_name.errors %}
-            <p class="help is-danger">{{ form.first_name.errors.0 }}</p>
-          {% endif %}
+          
           <p class="help">
             Este nombre se va a usar en las notificaciones por mail cuando hacés una solicitud
           </p>
@@ -78,20 +72,20 @@
         <div class="field">
           <label class="label">Email <span class="has-text-danger">*</span></label>
           <div class="control">
-            <input class="input" type="email" name="email" value="{{ form.email.value|default:'' }}" placeholder="tu@email.com" required />
+            <input class="input" type="email" name="email" value="{{ current_user.email }}" placeholder="tu@email.com" required />
           </div>
           {% if form.email.errors %}
-            <p class="help is-danger">{{ form.email.errors.0 }}</p>
+            <p class="help is-danger">{{ form.email.errors[0] }}</p>
           {% endif %}
         </div>
 
         <div class="field">
           <label class="label">Contacto alternativo</label>
           <div class="control">
-            <input class="input" type="text" name="alternate_contact" value="{{ form.alternate_contact.value|default:'' }}" placeholder="@usuario, teléfono, etc." />
+            <input class="input" type="text" name="alternate_contact" value="{{ form.alternate_contact.data or '' }}" placeholder="@usuario, teléfono, etc." />
           </div>
           {% if form.alternate_contact.errors %}
-            <p class="help is-danger">{{ form.alternate_contact.errors.0 }}</p>
+            <p class="help is-danger">{{ form.alternate_contact.errors[0] }}</p>
           {% endif %}
           <p class="help">
             Opcional: otra forma de contactarte (WhatsApp, Instagram, etc.)
@@ -102,10 +96,10 @@
       <div class="field">
         <label class="label">Acerca de vos</label>
         <div class="control">
-          <textarea class="textarea" name="about" rows="4" placeholder="Lo que quieras que se vea en tu perfil público.">{{ form.about.value|default:'' }}</textarea>
+          <textarea class="textarea" name="about" rows="4" placeholder="Lo que quieras que se vea en tu perfil público.">{{ form.about.data or '' }}</textarea>
         </div>
         {% if form.about.errors %}
-          <p class="help is-danger">{{ form.about.errors.0 }}</p>
+          <p class="help is-danger">{{ form.about.errors[0] }}</p>
         {% endif %}
       </div>
 
@@ -114,8 +108,8 @@
         <div class="is-flex is-align-items-center" style="gap: 1rem;">
           <input type="file" name="profile_picture" id="js-avatar-input" accept="image/*" style="display: none;">
           <div id="avatar-preview-container">
-            {% if user.profile.profile_picture %}
-            <img src="{{ user.profile.profile_picture.url }}" alt="{{ user.username }}" id="avatar-preview" style="width: 72px; height: 72px; border-radius: 4px; object-fit: cover; object-position: center 25%; flex-shrink: 0;">
+            {% if current_user.profile.profile_picture %}
+            <img src="{{ current_current_user.profile.profile_picture_url }}" alt="{{ current_user.username }}" id="avatar-preview" style="width: 72px; height: 72px; border-radius: 4px; object-fit: cover; object-position: center 25%; flex-shrink: 0;">
             {% else %}
             <span style="width: 72px; height: 72px; border-radius: 4px; flex-shrink: 0; background-color: var(--bulma-scheme-main-bis); display: inline-flex; align-items: center; justify-content: center;">
               <span class="icon is-large has-text-grey"><i class="fas fa-user fa-2x"></i></span>
@@ -124,7 +118,7 @@
           </div>
           <button type="button" class="button is-info is-light" id="js-avatar-upload-btn">
             <span class="icon is-small"><i class="fas fa-camera"></i></span>
-            <span>{% if user.profile.profile_picture %}Cambiar foto{% else %}Subir foto{% endif %}</span>
+            <span>{% if current_user.profile.profile_picture %}Cambiar foto{% else %}Subir foto{% endif %}</span>
           </button>
         </div>
         {% if avatar_error %}

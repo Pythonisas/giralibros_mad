@@ -1,5 +1,5 @@
 {% extends "base_logged.html" %}
-{% load book_filters %}
+
 
 {% block extra_css %}{% endblock %}
 
@@ -7,7 +7,7 @@
 <div class="columns is-centered">
   <div class="column is-full-mobile is-10-tablet is-8-desktop">
     <div class="mb-3">
-      <a href="{% url 'home' %}" class="button is-white">
+      <a href="{{ url_for('views.list_books') }}" class="button is-white">
         <span class="icon is-small">
           <i class="fas fa-arrow-left"></i>
         </span>
@@ -20,7 +20,7 @@
       <div class="mb-3">
         <div class="is-flex is-align-items-flex-start" style="gap: 0.75rem;">
           {% if profile_user.profile.profile_picture %}
-          <img src="{{ profile_user.profile.profile_picture.url }}" alt="{{ profile_user.username }}" style="width: 72px; height: 72px; border-radius: 4px; object-fit: cover; object-position: center 25%; flex-shrink: 0;">
+          <img src="{{ profile_user.profile.profile_picture_url }}" alt="{{ profile_user.username }}" style="width: 72px; height: 72px; border-radius: 4px; object-fit: cover; object-position: center 25%; flex-shrink: 0;">
           {% else %}
           <span style="width: 72px; height: 72px; border-radius: 4px; flex-shrink: 0; background-color: var(--bulma-scheme-main-bis); display: inline-flex; align-items: center; justify-content: center;">
             <span class="icon is-large has-text-grey"><i class="fas fa-user fa-2x"></i></span>
@@ -31,7 +31,7 @@
               <h1 class="title is-4 mb-0">{{ profile_user.username }}</h1>
               {% if is_own_profile %}
               <div class="buttons mb-0">
-                <a href="{% url 'profile_edit' %}" class="button is-white">
+                <a href="{{ url_for('views.profile_edit') }}" class="button is-white">
                   <span class="icon is-small"><i class="fas fa-edit"></i></span>
                   <span>Editar</span>
                 </a>
@@ -43,8 +43,8 @@
               {% endif %}
             </div>
             <div class="tags mb-0">
-              {% for location in profile_user.locations.all %}
-              <span class="tag location-badge">{{ location.get_area_display }}</span>
+              {% for location in profile_user.locations %}
+              <span class="tag location-badge">{{ location.get_area_display() }}</span>
               {% endfor %}
             </div>
           </div>
@@ -62,19 +62,19 @@
           <span class="icon is-small mr-1">
             <i class="fas fa-calendar-alt"></i>
           </span>
-          <span>Miembro desde {{ profile_user.date_joined|date:"F Y" }}</span>
+          <span>Miembro desde {{ profile_user.date_joined|month_year }}</span>
         </div>
         <div class="control is-size-7 has-text-grey">
           <span class="icon is-small mr-1">
             <i class="fas fa-inbox"></i>
           </span>
-          <span>{{ profile_user.received_requests.count }} solicitudes recibidas</span>
+          <span>{{ profile_user.received_requests|length }} solicitudes recibidas</span>
         </div>
         <div class="control is-size-7 has-text-grey">
           <span class="icon is-small mr-1">
             <i class="fas fa-paper-plane"></i>
           </span>
-          <span>{{ profile_user.sent_requests.count }} solicitudes enviadas</span>
+          <span>{{ profile_user.sent_requests|length }} solicitudes enviadas</span>
         </div>
         <div class="control is-size-7 has-text-grey">
           <span class="icon is-small mr-1">
@@ -96,7 +96,7 @@
         </h2>
         {% if is_own_profile %}
         <div class="buttons mb-0">
-          <a href="{% url 'my_offered' %}" class="button is-white">
+          <a href="{{ url_for('views.my_offered_books') }}" class="button is-white">
             <span class="icon is-small"><i class="fas fa-edit"></i></span>
             <span>Editar</span>
           </a>
@@ -107,11 +107,11 @@
       {% if offered_books %}
       <div class="columns is-multiline mb-3" id="offered-books-container">
         {% for book in offered_books %}
-        <div class="column is-12-mobile is-6-tablet offered-book-item" {% if forloop.counter > books_per_page %}style="display: none;"{% endif %}>
+        <div class="column is-12-mobile is-6-tablet offered-book-item" {% if loop.index > books_per_page %}style="display: none;"{% endif %}>
           <div class="is-flex" style="gap: 1rem;">
             <div class="is-flex-shrink-0 is-flex is-align-items-center book-cover-container-small">
               {% if book.cover_image %}
-                <img src="{{ book.cover_image.url }}" alt="{{ book.title }}" class="book-cover-small">
+                <img src="{{ book.cover_image_url }}" alt="{{ book.title }}" class="book-cover-small">
               {% else %}
                 <div class="book-placeholder book-cover-container-small is-flex is-justify-content-center is-align-items-center">
                   <span class="icon is-small has-text-grey">
@@ -131,7 +131,7 @@
               </div>
               <div class="buttons">
                 {% if is_own_profile %}
-                  <a href="{% url 'edit_offered_book' book.id %}" class="button is-small is-white">
+                  <a href="{{ url_for('views.my_offered_books', book_id=book.id) }}" class="button is-small is-white">
                     <span class="icon is-small">
                       <i class="fas fa-edit"></i>
                     </span>
@@ -171,11 +171,11 @@
         </h2>
         {% if is_own_profile %}
         <div class="buttons mb-0">
-          <a href="{% url 'my_wanted' %}" class="button is-white">
+          <a href="{{ url_for('views.my_wanted_books') }}" class="button is-white">
             <span class="icon is-small"><i class="fas fa-edit"></i></span>
             <span>Editar</span>
           </a>
-          <a href="{% url 'home' %}?wanted" class="button is-white">
+          <a href="{{ url_for('views.list_books') }}?wanted" class="button is-white">
             <span class="icon is-small"><i class="fas fa-search"></i></span>
             <span>Buscar</span>
           </a>
@@ -228,13 +228,13 @@
         <span class="icon">
           <i class="fas fa-paper-plane"></i>
         </span>
-        <span>Solicitudes enviadas ({{ profile_user.sent_requests.count }})</span>
+        <span>Solicitudes enviadas ({{ profile_user.sent_requests|length }})</span>
       </h2>
 
       <ul class="mb-5 nested-content">
         {% for req in sent_requests %}
         <li class="mb-2">
-          <strong>{{ req.book_title }}</strong>, {{ req.book_author }} · {% if req.to_user %}<a href="{% url 'profile' username=req.to_user.username %}" class="is-size-7">{{ req.to_user.username }}</a>{% else %}<span class="is-size-7">usuario desactivado</span>{% endif %} · <span class="has-text-grey is-size-7 timeago-tooltip" data-timestamp="{{ req.created_at|date:'c' }}">{{ req.created_at|timeago }}</span>
+          <strong>{{ req.book_title }}</strong>, {{ req.book_author }} · {% if req.to_user %}<a href="{{ url_for('views.profile', username=req.to_user.username) }}" class="is-size-7">{{ req.to_user.username }}</a>{% else %}<span class="is-size-7">usuario desactivado</span>{% endif %} · <span class="has-text-grey is-size-7 timeago-tooltip" data-timestamp="{{ req.created_at|isoformat }}">{{ req.created_at|timeago }}</span>
         </li>
         {% endfor %}
       </ul>
@@ -247,13 +247,13 @@
         <span class="icon">
           <i class="fas fa-inbox"></i>
         </span>
-        <span>Solicitudes recibidas ({{ profile_user.received_requests.count }})</span>
+        <span>Solicitudes recibidas ({{ profile_user.received_requests|length }})</span>
       </h2>
 
       <ul class="mb-5 nested-content">
         {% for req in received_requests %}
         <li class="mb-2">
-          <strong>{{ req.book_title }}</strong>, {{ req.book_author }} · <a href="{% url 'profile' username=req.from_user.username %}" class="is-size-7">{{ req.from_user.username }}</a> · <span class="has-text-grey is-size-7 timeago-tooltip" data-timestamp="{{ req.created_at|date:'c' }}">{{ req.created_at|timeago }}</span>
+          <strong>{{ req.book_title }}</strong>, {{ req.book_author }} · <a href="{{ url_for('views.profile', username=req.from_user.username) }}" class="is-size-7">{{ req.from_user.username }}</a> · <span class="has-text-grey is-size-7 timeago-tooltip" data-timestamp="{{ req.created_at|isoformat }}">{{ req.created_at|timeago }}</span>
         </li>
         {% endfor %}
       </ul>

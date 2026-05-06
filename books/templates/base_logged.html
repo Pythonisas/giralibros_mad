@@ -3,19 +3,19 @@
 {% block extra_css %}{% endblock %}
 
 {% block content %}
-    {% if user.profile %}
+    {% if current_user.profile %}
     <nav class="navbar is-fixed-top" role="navigation" aria-label="main navigation">
         <div class="container py-1 navbar-container">
             <div class="navbar-brand">
-                <a class="navbar-item has-text-weight-bold is-size-4" href="{% url 'home' %}">
+                <a class="navbar-item has-text-weight-bold is-size-4" href="{{ url_for('views.list_books') }}">
                     <span id="brandIcon">
                         <span id="brandEmoji">📚</span>
                         <i id="brandSpinner" class="fas fa-spinner fa-spin is-hidden"></i>
                     </span> GiraLibros
                 </a>
                 <span id="navbarAvatarToggle" class="is-hidden-desktop" style="margin-left: auto; padding: 0 0.5rem; display: flex; align-items: center; cursor: pointer;">
-                    {% if request.user.profile.profile_picture %}
-                    <img src="{{ request.user.profile.profile_picture.url }}" alt="{{ request.user.username }}" style="width: 40px; height: 40px; object-fit: cover; object-position: center 25%; border-radius: 4px; flex-shrink: 0;">
+                    {% if current_user.profile.profile_picture %}
+                    <img src="{{ current_user.profile.profile_picture_url }}" alt="{{ current_user.username }}" style="width: 40px; height: 40px; object-fit: cover; object-position: center 25%; border-radius: 4px; flex-shrink: 0;">
                     {% else %}
                     <span style="width: 40px; height: 40px; border-radius: 4px; background-color: var(--bulma-scheme-main-bis); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
                         <span class="icon is-small has-text-grey"><i class="fas fa-user"></i></span>
@@ -33,7 +33,7 @@
             <div id="navbarMenu" class="navbar-menu">
                 <div class="navbar-start">
                     <div class="navbar-item is-hidden-desktop">
-                        <form action="{% url 'home' %}" method="get" class="full-width">
+                        <form action="{{ url_for('views.list_books') }}" method="get" class="full-width">
                             <div class="control has-icons-right full-width">
                                 <input class="input" type="search" name="search" placeholder="Buscar Libro o Autor" value="{{ search_query }}">
                                 <button type="submit" class="icon is-right search-icon-button" title="Buscar">
@@ -42,43 +42,43 @@
                             </div>
                         </form>
                     </div>
-                    <a class="navbar-item is-hidden-desktop" href="{% url 'profile' username=request.user.username %}">
+                    <a class="navbar-item is-hidden-desktop" href="{{ url_for('views.profile', username=current_user.username) }}">
                         Ver mi perfil
                     </a>
-                    <a class="navbar-item is-hidden-desktop" href="{% url 'my_offered' %}">
+                    <a class="navbar-item is-hidden-desktop" href="{{ url_for('views.my_offered_books') }}">
                         Mis libros ofrecidos
                     </a>
-                    <a class="navbar-item is-hidden-desktop" href="{% url 'about' %}">
+                    <a class="navbar-item is-hidden-desktop" href="{{ url_for('views.about') }}">
                         Acerca de GiraLibros
                     </a>
-                    <a class="navbar-item is-hidden-desktop" href="{% url 'logout' %}">
+                    <a class="navbar-item is-hidden-desktop" href="{{ url_for('views.logout') }}">
                         Cerrar sesión
                     </a>
                 </div>
                 <div class="navbar-end">
                     <div class="navbar-item has-dropdown is-hoverable is-hidden-touch">
                         <a class="navbar-link" style="padding-top: 0; padding-bottom: 0; align-items: center;">
-                            {% if request.user.profile.profile_picture %}
-                            <img src="{{ request.user.profile.profile_picture.url }}" alt="{{ request.user.username }}" class="mr-2" style="width: 40px; height: 40px; max-height: none; object-fit: cover; object-position: center 25%; border-radius: 4px; flex-shrink: 0;">
+                            {% if current_user.profile.profile_picture %}
+                            <img src="{{ current_user.profile.profile_picture_url }}" alt="{{ current_user.username }}" class="mr-2" style="width: 40px; height: 40px; max-height: none; object-fit: cover; object-position: center 25%; border-radius: 4px; flex-shrink: 0;">
                             {% else %}
                             <span class="mr-2" style="width: 40px; height: 40px; border-radius: 4px; background-color: var(--bulma-scheme-main-bis); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
                                 <span class="icon is-small has-text-grey"><i class="fas fa-user"></i></span>
                             </span>
                             {% endif %}
-                            <span class="has-text-weight-bold">{{ request.user.username }}</span>
+                            <span class="has-text-weight-bold">{{ current_user.username }}</span>
                         </a>
                         <div class="navbar-dropdown">
-                            <a class="navbar-item" href="{% url 'profile' username=request.user.username %}">
+                            <a class="navbar-item" href="{{ url_for('views.profile', username=current_user.username) }}">
                                 Ver mi perfil
                             </a>
-                            <a class="navbar-item" href="{% url 'my_offered' %}">
+                            <a class="navbar-item" href="{{ url_for('views.my_offered_books') }}">
                                 Mis libros ofrecidos
                             </a>
-                            <a class="navbar-item" href="{% url 'about' %}">
+                            <a class="navbar-item" href="{{ url_for('views.about') }}">
                                 Acerca de GiraLibros
                             </a>
                             <hr class="navbar-divider">
-                            <a class="navbar-item" href="{% url 'logout' %}">
+                            <a class="navbar-item" href="{{ url_for('views.logout') }}">
                                 Cerrar sesión
                             </a>
                         </div>
@@ -87,7 +87,7 @@
             </div>
 
             <div class="is-hidden-touch navbar-search-centered">
-                <form action="{% url 'home' %}" method="get">
+                <form action="{{ url_for('views.list_books') }}" method="get">
                     <div class="control has-icons-right">
                         <input class="input" type="search" name="search" placeholder="Buscar Libro o Autor" value="{{ search_query }}">
                         <button type="submit" class="icon is-right search-icon-button" title="Buscar">
@@ -232,7 +232,7 @@
                 button.disabled = true;
                 const bookId = button.dataset.bookId;
 
-                fetch(`/books/${bookId}/like/`, {
+                fetch(`/like/${bookId}/`, {
                     method: 'POST',
                     headers: { 'X-CSRFToken': csrftoken },
                 })
@@ -283,7 +283,7 @@
                 button.classList.add('is-loading');
 
                 // Make AJAX request
-                fetch(`/books/${bookId}/request-exchange/`, {
+                fetch(`/request-exchange/${bookId}/`, {
                     method: 'POST',
                     headers: {
                         'X-CSRFToken': csrftoken,
