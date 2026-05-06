@@ -3,7 +3,7 @@ import os
 from flask import Flask
 
 from config import config
-from extensions import db, login_manager, mail, migrate
+from extensions import csrf, db, login_manager, mail, migrate
 from books.filters import isoformat, linebreaks, linebreaksbr, month_year, timeago, urlize_filter
 
 
@@ -22,6 +22,7 @@ def create_app(config_name=None):
     login_manager.init_app(app)
     mail.init_app(app)
     migrate.init_app(app, db)
+    csrf.init_app(app)
 
     login_manager.login_view = "views.login"
     login_manager.login_message = "Por favor iniciá sesión para acceder a esta página."
@@ -42,5 +43,8 @@ def create_app(config_name=None):
 
     from books.views import views as views_blueprint
     app.register_blueprint(views_blueprint)
+
+    from books.admin_views import init_admin
+    init_admin(app)
 
     return app

@@ -74,26 +74,31 @@ def list_books():
     my_locations = "my_locations" in request.args
     page = request.args.get("page", 1, type=int)
 
-    books = get_books_for_user(
+    per_page = current_app.config.get("BOOKS_PER_PAGE", 20)
+    page = max(1, page)
+
+    total, page_books = get_books_for_user(
         current_user,
         search=search or None,
         wanted=wanted,
         photo=photo,
         my_locations=my_locations,
+        page=page,
+        per_page=per_page,
     )
 
-    per_page = current_app.config.get("BOOKS_PER_PAGE", 20)
-    total = len(books)
     total_pages = max(1, (total + per_page - 1) // per_page)
-
-    # Clamp page
-    if page < 1:
-        page = 1
-    elif page > total_pages:
+    if page > total_pages:
         page = total_pages
-
-    start = (page - 1) * per_page
-    page_books = books[start : start + per_page]
+        _, page_books = get_books_for_user(
+            current_user,
+            search=search or None,
+            wanted=wanted,
+            photo=photo,
+            my_locations=my_locations,
+            page=page,
+            per_page=per_page,
+        )
 
     has_next = page < total_pages
     has_offered = False
@@ -127,8 +132,29 @@ def list_books():
 
 
 @views.route("/about/")
+@login_required
 def about():
-    return render_template("about.html")
+    registered_users = db.session.execute(
+        db.select(db.func.count(User.id)).where(User.profile.has())
+    ).scalar()
+    offered_books = db.session.execute(
+        db.select(db.func.count(OfferedBook.id)).where(OfferedBook.status == BookStatus.NEW)
+    ).scalar()
+    traded_books = db.session.execute(
+        db.select(db.func.count(OfferedBook.id)).where(OfferedBook.status == BookStatus.TRADED)
+    ).scalar()
+    recent_requests = db.session.execute(
+        db.select(db.func.count(ExchangeRequest.id)).where(
+            ExchangeRequest.created_at >= datetime.now(timezone.utc) - timedelta(days=7)
+        )
+    ).scalar()
+    return render_template(
+        "about.html",
+        registered_users=registered_users,
+        offered_books=offered_books,
+        traded_books=traded_books,
+        recent_requests=recent_requests,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -201,8 +227,8 @@ def login():
             login_user(user, remember=form.remember_me.data)
             user.last_login = datetime.now(timezone.utc)
             db.session.commit()
-            next_url = request.args.get("next") or url_for("views.list_books")
-            return redirect(next_url)
+            next_url = request.args.get("next") or ""
+            return redirect(_safe_next(next_url))
         else:
             flash("Usuario o contraseña incorrectos.", "danger")
 
@@ -397,6 +423,7 @@ def profile(username):
         is_own_profile=is_own_profile,
         wanted_books=wanted_books,
         traded_books_count=len(traded),
+        books_per_page=current_app.config.get("BOOKS_PER_PAGE", 20),
     )
 
 
@@ -511,6 +538,7 @@ def delete_offered_book(book_id):
     if not book or book.user_id != current_user.id:
         abort(403)
     book.delete()
+    db.session.commit()
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
         return jsonify({"ok": True}), 200
     flash("Libro eliminado.", "success")
@@ -524,6 +552,7 @@ def trade_offered_book(book_id):
     if not book or book.user_id != current_user.id:
         abort(403)
     book.trade()
+    db.session.commit()
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
         return jsonify({"ok": True}), 200
     flash("Libro marcado como intercambiado.", "success")
@@ -537,6 +566,7 @@ def reserve_offered_book(book_id):
     if not book or book.user_id != current_user.id:
         abort(403)
     book.reserve()
+    db.session.commit()
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
         return jsonify({"ok": True}), 200
     return redirect(url_for("views.my_offered_books"))
@@ -640,15 +670,16 @@ def request_exchange(book_id):
         book_author=book.author,
     )
     db.session.add(er)
-    db.session.commit()
+    db.session.flush()
 
     try:
         _send_exchange_request_email(er)
     except Exception:
-        db.session.delete(er)
-        db.session.commit()
+        current_app.logger.exception("Failed to send exchange request email for book %s", book.id)
+        db.session.rollback()
         return jsonify({"error": "Error enviando el email de solicitud."}), 500
 
+    db.session.commit()
     return jsonify({"message": "Solicitud de intercambio enviada."}), 201
 
 
@@ -660,10 +691,18 @@ def request_exchange(book_id):
 @views.route("/like/<int:book_id>/", methods=["POST"])
 @login_required
 def like_book(book_id):
-    book = db.session.get(OfferedBook, book_id)
+    book = db.session.execute(
+        db.select(OfferedBook).where(
+            OfferedBook.id == book_id,
+            OfferedBook.status.notin_([BookStatus.DELETED, BookStatus.TRADED]),
+        )
+    ).scalar_one_or_none()
     if not book:
         abort(404)
+    if book.user_id == current_user.id:
+        return jsonify({"error": "No podés dar like a tus propios libros."}), 400
     is_liked = book.toggle_like(current_user)
+    db.session.commit()
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
         return jsonify({"likes": book.likes, "liked": is_liked})
     return redirect(request.referrer or url_for("views.list_books"))
@@ -728,9 +767,11 @@ def _send_exchange_request_email(exchange_request):
     ]
     requester_profile = requester.profile
 
+    reply_to = requester.profile.contact_email if requester.profile else None
     msg = Message(
         subject=f"Solicitud de intercambio de {requester.username}",
         recipients=[to_user.email],
+        reply_to=reply_to,
         html=render_template(
             "emails/exchange_request.html",
             to_user=to_user,
@@ -778,20 +819,24 @@ def _save_book_cover(file_storage, book_id):
         content_type = f"image/{ext}" if ext != "jpg" else "image/jpeg"
 
     try:
+        from PIL import ImageOps
         img = Image.open(io.BytesIO(content))
+        img = ImageOps.exif_transpose(img)
         img = img.convert("RGB")
         max_w = current_app.config.get("BOOK_COVER_THUMBNAIL_MAX_WIDTH", 400)
         max_h = current_app.config.get("BOOK_COVER_THUMBNAIL_MAX_HEIGHT", 600)
         img.thumbnail((max_w, max_h), Image.LANCZOS)
 
+        import time
         folder = os.path.join(current_app.config.get("MEDIA_FOLDER", "media"), "covers")
         os.makedirs(folder, exist_ok=True)
-        filename = f"cover_{book_id}.jpg"
+        filename = f"cover_{book_id}_{time.time_ns()}.jpg"
         path = os.path.join(folder, filename)
         quality = current_app.config.get("BOOK_COVER_JPEG_QUALITY", 85)
         img.save(path, "JPEG", quality=quality)
         return f"covers/{filename}"
     except Exception:
+        current_app.logger.exception("Failed to save book cover for book %s", book_id)
         return None
 
 
@@ -815,7 +860,9 @@ def _save_profile_picture(file_storage, user_id):
             return None
 
     try:
+        from PIL import ImageOps
         img = Image.open(io.BytesIO(content))
+        img = ImageOps.exif_transpose(img)
         img = img.convert("RGB")
         max_dim = current_app.config.get("PROFILE_PICTURE_MAX_DIMENSION", 300)
         img.thumbnail((max_dim, max_dim), Image.LANCZOS)
@@ -828,17 +875,32 @@ def _save_profile_picture(file_storage, user_id):
         img.save(path, "JPEG", quality=quality)
         return f"profile_pics/{filename}"
     except Exception:
+        current_app.logger.exception("Failed to save profile picture for user %s", user_id)
         return None
 
 
+def _safe_next(target):
+    """Return target if it is a safe same-host relative URL, else the book list."""
+    from urllib.parse import urlparse, urljoin
+    fallback = url_for("views.list_books")
+    if not target:
+        return fallback
+    ref = urlparse(request.host_url)
+    test = urlparse(urljoin(request.host_url, target))
+    if test.scheme in ("http", "https") and ref.netloc == test.netloc:
+        return target
+    return fallback
+
+
 def _delete_media_file(relative_path):
-    """Delete a file from the media folder silently."""
+    """Delete a file from the media folder."""
     if not relative_path:
         return
     try:
         media_folder = current_app.config.get("MEDIA_FOLDER", "media")
-        path = os.path.normpath(os.path.join(media_folder, relative_path))
-        if path.startswith(media_folder) and os.path.isfile(path):
-            os.remove(path)
+        abs_media = os.path.abspath(media_folder)
+        abs_path = os.path.abspath(os.path.join(media_folder, relative_path))
+        if abs_path.startswith(abs_media + os.sep) and os.path.isfile(abs_path):
+            os.remove(abs_path)
     except Exception:
-        pass
+        current_app.logger.exception("Failed to delete media file: %s", relative_path)

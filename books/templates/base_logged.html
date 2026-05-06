@@ -202,7 +202,7 @@
 
     <script>
         document.addEventListener('DOMContentLoaded', () => {
-            const csrftoken = '{{ csrf_token }}';
+            const csrftoken = '{{ csrf_token() }}';
             const modal = document.getElementById('exchangeModal');
             const messageBox = document.getElementById('exchangeMessage');
             const messageTitle = document.getElementById('exchangeMessageTitle');

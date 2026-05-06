@@ -174,7 +174,6 @@ class OfferedBook(db.Model):
         self.status = BookStatus.DELETED
         self.status_changed_at = datetime.now(timezone.utc)
         db.session.add(self)
-        db.session.commit()
 
     def trade(self):
         """Mark as traded and remove cover image from disk."""
@@ -183,7 +182,6 @@ class OfferedBook(db.Model):
         self.status = BookStatus.TRADED
         self.status_changed_at = datetime.now(timezone.utc)
         db.session.add(self)
-        db.session.commit()
 
     def reserve(self):
         """Toggle book reservation status between NEW and RESERVED."""
@@ -193,7 +191,6 @@ class OfferedBook(db.Model):
             self.status = BookStatus.RESERVED
         self.status_changed_at = datetime.now(timezone.utc)
         db.session.add(self)
-        db.session.commit()
 
     def add_like(self, user):
         """Create a like from user, incrementing the counter. Silently ignores duplicates."""
@@ -216,25 +213,24 @@ class OfferedBook(db.Model):
             db.session.execute(
                 db.update(OfferedBook).where(OfferedBook.id == self.id).values(likes=OfferedBook.likes + 1)
             )
-            db.session.commit()
             return True
         else:
             db.session.delete(existing)
             db.session.execute(
                 db.update(OfferedBook).where(OfferedBook.id == self.id, OfferedBook.likes > 0).values(likes=OfferedBook.likes - 1)
             )
-            db.session.commit()
             return False
 
     def _remove_cover_file(self):
         if self.cover_image:
             try:
                 media_folder = current_app.config.get("MEDIA_FOLDER", "media")
-                file_path = os.path.normpath(os.path.join(media_folder, self.cover_image))
-                if file_path.startswith(media_folder) and os.path.exists(file_path):
-                    os.remove(file_path)
+                abs_media = os.path.abspath(media_folder)
+                abs_path = os.path.abspath(os.path.join(media_folder, self.cover_image))
+                if abs_path.startswith(abs_media + os.sep) and os.path.exists(abs_path):
+                    os.remove(abs_path)
             except Exception:
-                pass
+                current_app.logger.exception("Failed to remove cover file: %s", self.cover_image)
 
     def __str__(self):
         return f"OfferedBook({self.title}, {self.author})"
@@ -282,9 +278,9 @@ class ExchangeRequest(db.Model):
     __tablename__ = "exchange_request"
 
     id = db.Column(db.Integer, primary_key=True)
-    from_user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
-    to_user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
-    offered_book_id = db.Column(db.Integer, db.ForeignKey("offered_book.id"), nullable=True)
+    from_user_id = db.Column(db.Integer, db.ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    to_user_id = db.Column(db.Integer, db.ForeignKey("user.id", ondelete="SET NULL"), nullable=True)
+    offered_book_id = db.Column(db.Integer, db.ForeignKey("offered_book.id", ondelete="SET NULL"), nullable=True)
     book_title = db.Column(db.String(200), nullable=False)
     book_author = db.Column(db.String(200), nullable=False)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
@@ -314,8 +310,8 @@ def get_traded_by(user):
     ).scalars().all()
 
 
-def get_books_for_user(user, search=None, wanted=False, photo=False, my_locations=False):
-    """Return books available to the user with all filters applied."""
+def get_books_for_user(user, search=None, wanted=False, photo=False, my_locations=False, page=1, per_page=None):
+    """Return (total, books) for the given page. Pagination is done at the DB level."""
     stmt = get_available_books().join(User, OfferedBook.user_id == User.id)
 
     if getattr(user, "is_authenticated", False) and my_locations:
@@ -342,7 +338,7 @@ def get_books_for_user(user, search=None, wanted=False, photo=False, my_location
         ).scalars().all()
 
         if not wanted_books:
-            return []
+            return 0, []
 
         conditions = []
         for wb in wanted_books:
@@ -359,15 +355,28 @@ def get_books_for_user(user, search=None, wanted=False, photo=False, my_location
     if photo:
         stmt = stmt.where(OfferedBook.cover_image.isnot(None), OfferedBook.cover_image != "")
 
-    last_activity = db.func.max(
-        OfferedBook.created_at,
-        db.func.coalesce(OfferedBook.cover_uploaded_at, OfferedBook.created_at),
+    last_activity = db.case(
+        (
+            db.and_(
+                OfferedBook.cover_uploaded_at.isnot(None),
+                OfferedBook.cover_uploaded_at > OfferedBook.created_at,
+            ),
+            OfferedBook.cover_uploaded_at,
+        ),
+        else_=OfferedBook.created_at,
     )
     stmt = stmt.order_by(last_activity.desc())
 
+    total = db.session.execute(
+        db.select(db.func.count()).select_from(stmt.subquery())
+    ).scalar()
+
+    if per_page is not None:
+        stmt = stmt.offset((page - 1) * per_page).limit(per_page)
+
     books = db.session.execute(stmt).scalars().all()
     _annotate_books(books, user)
-    return books
+    return total, books
 
 
 def get_books_for_profile(profile_user, viewing_user):
